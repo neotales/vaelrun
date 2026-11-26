@@ -116,7 +116,7 @@ pub(crate) fn build_env(
         let stdout = run_injector(
             injector.program,
             injector.argv,
-            &serialize(&env),
+            &serialize(&env, &quotes),
             cwd,
             parent,
         )?;
@@ -208,33 +208,96 @@ fn reject_invalid(path: &Path, document: &Document) -> Result<(), Error> {
     Ok(())
 }
 
-fn serialize(env: &Environment) -> String {
+fn serialize(env: &Environment, quotes: &HashMap<String, QuoteStyle>) -> String {
     let mut out = String::new();
     for (key, value) in env.as_map() {
         out.push_str(key);
         out.push('=');
-        out.push_str(&encode_value(value));
+        out.push_str(&encode_value(value, quotes.get(key).copied()));
         out.push('\n');
     }
     out
 }
 
-fn encode_value(value: &str) -> String {
-    let quote = value.contains([' ', '#', '\'', '"', '$', '\n'])
-        || value.starts_with(' ')
-        || value.ends_with(' ');
-    if !quote {
-        return value.to_string();
+/// Encode `value` so `neotales_dotenv::parse` reports the same characters and a
+/// quote style that keeps the same expansion rule.
+///
+/// The parser strips one opening delimiter and one trailing delimiter. It does
+/// not unescape `\"` or understand `'\''`, so those forms are not emitted.
+/// Wrapping `'value'` still round-trips an embedded `'`. The case that does
+/// not: a literal value that contains a newline and a line ending in both `'`
+/// and `` ` ``. Neither quote can wrap it. That value is emitted in an
+/// expandable form, and `$` in it will expand. That case is skipped.
+fn encode_value(value: &str, style: Option<QuoteStyle>) -> String {
+    let literal = matches!(style, Some(QuoteStyle::Single | QuoteStyle::Raw));
+    if literal && let Some(encoded) = literal_form(value) {
+        return encoded;
     }
-    let mut encoded = String::from("\"");
-    for ch in value.chars() {
-        if ch == '"' || ch == '\\' {
-            encoded.push('\\');
+    expandable_form(value)
+}
+
+fn literal_form(value: &str) -> Option<String> {
+    for (delimiter, style) in [('\'', QuoteStyle::Single), ('`', QuoteStyle::Raw)] {
+        let encoded = wrap(value, delimiter);
+        if round_trips(&encoded, value, style) {
+            return Some(encoded);
         }
-        encoded.push(ch);
     }
-    encoded.push('"');
+    None
+}
+
+fn expandable_form(value: &str) -> String {
+    if !needs_quotes(value)
+        && let Some(encoded) = unquoted_if_round_trips(value)
+    {
+        return encoded;
+    }
+    let encoded = wrap(value, '"');
+    if round_trips(&encoded, value, QuoteStyle::Double) {
+        return encoded;
+    }
+    if let Some(encoded) = unquoted_if_round_trips(value) {
+        return encoded;
+    }
+    // Last resort: do not invent backslash escapes the parser will keep.
+    value.to_string()
+}
+
+fn unquoted_if_round_trips(value: &str) -> Option<String> {
+    if round_trips(value, value, QuoteStyle::Unquoted) {
+        Some(value.to_string())
+    } else {
+        None
+    }
+}
+
+fn needs_quotes(value: &str) -> bool {
+    value.contains([' ', '#', '\n', '\r'])
+        || value.starts_with(char::is_whitespace)
+        || value.ends_with(char::is_whitespace)
+}
+
+fn wrap(value: &str, delimiter: char) -> String {
+    let mut encoded = String::new();
+    encoded.push(delimiter);
+    encoded.push_str(value);
+    encoded.push(delimiter);
     encoded
+}
+
+fn round_trips(encoded: &str, value: &str, style: QuoteStyle) -> bool {
+    let document = neotales_dotenv::parse(&format!("K={encoded}\n"));
+    if document.first_invalid().is_some() {
+        return false;
+    }
+    let mut assignments = document.assignments();
+    let Some(assignment) = assignments.next() else {
+        return false;
+    };
+    assignments.next().is_none()
+        && assignment.value == value
+        && assignment.quote == style
+        && assignment.key == "K"
 }
 
 fn run_injector(
@@ -310,16 +373,46 @@ mod tests {
     }
 
     #[test]
-    fn quoted_serializer_escapes_quotes_and_dollars() {
+    fn serializer_round_trips_quote_style() {
         let mut env = Environment::new(Platform::Unix);
         env.insert("PLAIN", "ok");
         env.insert("SPACE", "a b");
         env.insert("DOLLAR", "x$y");
         env.insert("QUOTE", "say \"hi\"");
-        let text = serialize(&env);
-        assert!(text.contains("PLAIN=ok\n"), "{text}");
-        assert!(text.contains("SPACE=\"a b\"\n"), "{text}");
-        assert!(text.contains("DOLLAR=\"x$y\"\n"), "{text}");
-        assert!(text.contains("QUOTE=\"say \\\"hi\\\"\"\n"), "{text}");
+        env.insert("LIT", "${HOME}");
+        env.insert("EMBED", "it's");
+        let mut quotes = HashMap::new();
+        quotes.insert("LIT".to_string(), QuoteStyle::Single);
+        quotes.insert("EMBED".to_string(), QuoteStyle::Single);
+        let text = serialize(&env, &quotes);
+        assert!(text.contains("DOLLAR=x$y\n"), "{text}");
+        assert!(!text.contains("\\\""), "{text}");
+        let document = neotales_dotenv::parse(&text);
+        assert!(document.first_invalid().is_none(), "{text}");
+        let lit = document
+            .assignments()
+            .find(|item| item.key == "LIT")
+            .unwrap();
+        assert_eq!(lit.value, "${HOME}");
+        assert_eq!(lit.quote, QuoteStyle::Single);
+        let embed = document
+            .assignments()
+            .find(|item| item.key == "EMBED")
+            .unwrap();
+        assert_eq!(embed.value, "it's");
+        assert_eq!(embed.quote, QuoteStyle::Single);
+        let dollar = document
+            .assignments()
+            .find(|item| item.key == "DOLLAR")
+            .unwrap();
+        assert_eq!(dollar.value, "x$y");
+        assert_ne!(dollar.quote, QuoteStyle::Single);
+    }
+
+    #[test]
+    fn shell_single_quote_escape_does_not_round_trip() {
+        let document = neotales_dotenv::parse("K='it'\\''s'\n");
+        let assignment = document.assignments().next().unwrap();
+        assert_ne!(assignment.value, "it's");
     }
 }

@@ -300,6 +300,28 @@ fn sudo_trust_refusal_on_a_pipeline_is_126() {
 }
 
 #[test]
+fn pass_through_injector_keeps_single_quotes_literal() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("config.ini");
+    fs::write(&cfg, "[secrets]\ninjector = /bin/cat\n").unwrap();
+    let envfile = dir.path().join("file.env");
+    fs::write(&envfile, "HOME=/from/file\nLIT='${HOME}'\nVAR=${HOME}\n").unwrap();
+    let out = Command::new(vrun())
+        .arg(&envfile)
+        .args(["/bin/sh", "-c", "printf '%s|%s' \"$LIT\" \"$VAR\""])
+        .env("VAELRUN_CONFIG", &cfg)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "${HOME}|/from/file");
+}
+
+#[test]
 fn dotenv_expands_braced_refs_in_order() {
     let dir = tempfile::tempdir().unwrap();
     let envfile = dir.path().join(".env");
