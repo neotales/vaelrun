@@ -41,11 +41,12 @@ pub(crate) fn run(opts: RunOptions) -> Result<i32, Error> {
         .map_err(|err| Error::new(1, format!("current directory: {err}")))?;
     let inv = cli::parse(&args, start)?;
     if inv.help {
-        write_stdout(HELP)?;
+        let name = invocation_name(args.first().map(OsString::as_os_str));
+        write_stdout(&help_text(&name))?;
         return Ok(0);
     }
     if inv.version {
-        write_stdout(&format!("vrun {}\n", env!("CARGO_PKG_VERSION")))?;
+        write_stdout(&format!("vaelrun {}\n", env!("CARGO_PKG_VERSION")))?;
         return Ok(0);
     }
     if !inv.cwd.is_dir() {
@@ -1382,16 +1383,35 @@ fn write_stdout(text: &str) -> Result<(), Error> {
     Ok(())
 }
 
-const HELP: &str = "\
-vrun — cross-platform run, open, and start
+/// File name of argv0, without a trailing `.exe`. Missing or empty names fall back to `vrun`.
+fn invocation_name(argv0: Option<&OsStr>) -> String {
+    let Some(argv0) = argv0 else {
+        return "vrun".to_string();
+    };
+    let Some(file) = Path::new(argv0).file_name().and_then(|name| name.to_str()) else {
+        return "vrun".to_string();
+    };
+    let lower = file.to_ascii_lowercase();
+    let name = lower.strip_suffix(".exe").unwrap_or(&lower);
+    if name.is_empty() {
+        "vrun".to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+fn help_text(name: &str) -> String {
+    format!(
+        "\
+vaelrun {version} — cross-platform run, open, and start
 
 Usage:
-  vrun [options] [NAME=value]... [dotenv]... <command> [args]...
-  vrun [options] open <target>
-  vrun [options] start <command> [args]...
-  vrun [options] run <command> [args]...
-  vrun [options] -e <path>
-  vrun complete bash|zsh|fish|pwsh
+  {name} [options] [NAME=value]... [dotenv]... <command> [args]...
+  {name} [options] open <target>
+  {name} [options] start <command> [args]...
+  {name} [options] run <command> [args]...
+  {name} [options] -e <path>
+  {name} complete bash|zsh|fish|pwsh
 
 Options:
   -e, --edit <path>     Open path in $VISUAL, $EDITOR, or vi/notepad
@@ -1403,14 +1423,20 @@ Options:
   --sudo                Prefix sudo after resolution
   -h, --help            Show this help
   --version             Show version
-";
+",
+        version = env!("CARGO_PKG_VERSION"),
+    )
+}
 
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
     use std::path::Path;
 
-    use super::{HostOs, OpenerChoice, OpenerFacts, choose_opener, is_builtin, script_builder};
+    use super::{
+        HostOs, OpenerChoice, OpenerFacts, choose_opener, help_text, invocation_name, is_builtin,
+        script_builder,
+    };
     use crate::cli::extension_suffix;
 
     #[test]
@@ -1472,5 +1498,23 @@ mod tests {
         assert_eq!(choose_opener(&facts), OpenerChoice::ShellExecute);
         facts.directory = true;
         assert_eq!(choose_opener(&facts), OpenerChoice::Explorer);
+    }
+
+    #[test]
+    fn help_names_the_product_and_the_invoked_file() {
+        let version = env!("CARGO_PKG_VERSION");
+        let text = help_text("vr");
+        assert!(text.starts_with(&format!("vaelrun {version} — ")), "{text}");
+        assert!(
+            text.lines()
+                .any(|line| line.trim_start().starts_with("vr "))
+        );
+        assert!(!text.contains("vrun"));
+
+        assert_eq!(invocation_name(Some(OsStr::new("vr.exe"))), "vr");
+        assert_eq!(invocation_name(Some(OsStr::new("VR.EXE"))), "vr");
+        assert_eq!(invocation_name(Some(OsStr::new("/usr/local/bin/vr"))), "vr");
+        assert_eq!(invocation_name(None), "vrun");
+        assert!(!help_text("vr").contains("vr.exe"));
     }
 }

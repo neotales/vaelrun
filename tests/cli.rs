@@ -814,6 +814,39 @@ fn alias_to_vrun_file_runs_the_line() {
 }
 
 #[test]
+fn help_uses_the_invoked_name() {
+    let (code, text) = capture_stdout(|| {
+        vaelrun::run_with(vaelrun::RunOptions {
+            args: Some(vec!["vr".into(), "-h".into()]),
+            ..Default::default()
+        })
+    });
+    assert_eq!(code.unwrap(), 0);
+    assert!(text.contains("vaelrun"), "{text}");
+    assert!(text.contains(env!("CARGO_PKG_VERSION")), "{text}");
+    assert!(
+        text.lines()
+            .any(|line| line.trim_start().starts_with("vr ")),
+        "{text}"
+    );
+    assert!(!text.contains("vrun"), "{text}");
+
+    let (code, text) = capture_stdout(|| {
+        vaelrun::run_with(vaelrun::RunOptions {
+            args: Some(vec!["vr.exe".into(), "--help".into()]),
+            ..Default::default()
+        })
+    });
+    assert_eq!(code.unwrap(), 0);
+    assert!(
+        text.lines()
+            .any(|line| line.trim_start().starts_with("vr ")),
+        "{text}"
+    );
+    assert!(!text.contains("vr.exe"), "{text}");
+}
+
+#[test]
 fn help_before_the_command_prints_usage() {
     let out = Command::new(vrun())
         .arg("-h")
@@ -841,6 +874,39 @@ fn help_after_the_command_is_an_argument() {
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.contains("-h"), "{text}");
     assert!(!text.contains("Usage:"), "{text}");
+}
+
+fn capture_stdout<T>(f: impl FnOnce() -> T) -> (T, String) {
+    use std::io::{Read, Write};
+    use std::os::unix::io::FromRawFd;
+    use std::sync::Mutex;
+
+    static LOCK: Mutex<()> = Mutex::new(());
+    let _guard = LOCK.lock().unwrap();
+
+    unsafe extern "C" {
+        fn pipe(fds: *mut i32) -> i32;
+        fn dup(fd: i32) -> i32;
+        fn dup2(oldfd: i32, newfd: i32) -> i32;
+        fn close(fd: i32) -> i32;
+    }
+
+    let mut fds = [0i32; 2];
+    assert_eq!(unsafe { pipe(fds.as_mut_ptr()) }, 0);
+    let saved = unsafe { dup(1) };
+    assert!(saved >= 0);
+    assert_eq!(unsafe { dup2(fds[1], 1) }, 1);
+    let result = f();
+    let _ = std::io::stdout().flush();
+    assert_eq!(unsafe { dup2(saved, 1) }, 1);
+    unsafe {
+        close(saved);
+        close(fds[1]);
+    }
+    let mut file = unsafe { std::fs::File::from_raw_fd(fds[0]) };
+    let mut text = String::new();
+    file.read_to_string(&mut text).unwrap();
+    (result, text)
 }
 
 fn wait_file(path: &Path) -> String {
