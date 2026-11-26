@@ -300,7 +300,7 @@ fn sudo_trust_refusal_on_a_pipeline_is_126() {
 }
 
 #[test]
-fn pass_through_injector_expands_single_quotes() {
+fn pass_through_injector_keeps_dotenv_literal() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = dir.path().join("config.ini");
     fs::write(&cfg, "[secrets]\ninjector = /bin/cat\n").unwrap();
@@ -318,14 +318,11 @@ fn pass_through_injector_expands_single_quotes() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(
-        String::from_utf8(out.stdout).unwrap(),
-        "/from/file|/from/file"
-    );
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "${HOME}|${HOME}");
 }
 
 #[test]
-fn dotenv_expands_braced_refs_in_order() {
+fn dotenv_braced_refs_stay_literal() {
     let dir = tempfile::tempdir().unwrap();
     let envfile = dir.path().join(".env");
     fs::write(&envfile, "BAR=there\nFOO=${BAR}\n").unwrap();
@@ -341,11 +338,11 @@ fn dotenv_expands_braced_refs_in_order() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(String::from_utf8(out.stdout).unwrap(), "there");
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "${BAR}");
 }
 
 #[test]
-fn single_quoted_dotenv_value_expands() {
+fn single_quoted_dotenv_value_stays_literal() {
     let dir = tempfile::tempdir().unwrap();
     let envfile = dir.path().join(".env");
     fs::write(&envfile, "BAR=there\nFOO='${BAR}'\n").unwrap();
@@ -361,7 +358,61 @@ fn single_quoted_dotenv_value_expands() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(String::from_utf8(out.stdout).unwrap(), "there");
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "${BAR}");
+}
+
+#[test]
+fn inline_assignment_expands_but_dotenv_does_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let envfile = dir.path().join("file.env");
+    fs::write(&envfile, "MY_VAR=${HOME}\n").unwrap();
+    let from_file = Command::new(vrun())
+        .arg(&envfile)
+        .args(["/bin/sh", "-c", "printf '%s' \"$MY_VAR\""])
+        .env("HOME", "/from/shell")
+        .env_remove("VAELRUN_CONFIG")
+        .output()
+        .unwrap();
+    assert_eq!(
+        from_file.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&from_file.stderr)
+    );
+    assert_eq!(String::from_utf8(from_file.stdout).unwrap(), "${HOME}");
+
+    let from_argv = Command::new(vrun())
+        .arg("MY_VAR=${HOME}")
+        .args(["/bin/sh", "-c", "printf '%s' \"$MY_VAR\""])
+        .env("HOME", "/from/shell")
+        .env_remove("VAELRUN_CONFIG")
+        .output()
+        .unwrap();
+    assert_eq!(
+        from_argv.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&from_argv.stderr)
+    );
+    assert_eq!(String::from_utf8(from_argv.stdout).unwrap(), "/from/shell");
+}
+
+#[test]
+fn inline_unquoted_dollar_expands() {
+    let out = Command::new(vrun())
+        .arg("MY_VAR=$HOME")
+        .args(["/bin/sh", "-c", "printf '%s' \"$MY_VAR\""])
+        .env("HOME", "/from/shell")
+        .env_remove("VAELRUN_CONFIG")
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "/from/shell");
 }
 
 #[test]
@@ -402,10 +453,7 @@ fn injector_replaces_env_and_still_expands() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(
-        String::from_utf8(out.stdout).unwrap(),
-        "/from-injector|/from-injector|"
-    );
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "${HOME}|${HOME}|");
     let seen = fs::read_to_string(&stdin_log).unwrap();
     let parent = seen.find("PARENT_VAR=from-parent").expect(&seen);
     let file = seen.find("FILE_VAR=from-file").expect(&seen);

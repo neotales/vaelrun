@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
@@ -75,6 +75,7 @@ pub(crate) fn build_env(
 ) -> Result<EnvMap, Error> {
     let mut env = Environment::new(Platform::host());
     let mut quotes: HashMap<String, QuoteStyle> = HashMap::new();
+    let mut inline_keys = HashSet::new();
     let mut non_utf8 = Vec::new();
 
     for (key, value) in parent {
@@ -110,6 +111,7 @@ pub(crate) fn build_env(
             continue;
         };
         put(&mut env, &mut quotes, key, value, None);
+        inline_keys.insert(stored_key(&env, key));
     }
 
     if let Some(injector) = injector {
@@ -144,19 +146,26 @@ pub(crate) fn build_env(
         }
     }
 
-    let expanded = expand(env);
+    let expanded = expand(env, &inline_keys);
     Ok(EnvMap::from_environment(&expanded, non_utf8))
 }
 
-/// Expand every value, including single-quoted and raw ones.
+/// Interpolate command-line assignments only.
 ///
-/// A shell strips the quotes around an inline assignment and expands double
-/// quotes itself, so a value that still contains `$NAME` arrived quoted. vrun
-/// is the process that must expand it.
-fn expand(source: Environment) -> Environment {
+/// A dotenv value is literal, whatever its quotes. The parent environment was
+/// already expanded by the shell. An inline assignment is the one case the
+/// shell could not expand: `MY_VAR='$HOME'` arrives as the token `MY_VAR=$HOME`.
+/// A key the injector added is not inline, so it stays literal. A key the
+/// injector rewrote is still inline, so the returned value is expanded.
+fn expand(source: Environment, inline_keys: &HashSet<String>) -> Environment {
     let mut out = Environment::new(Platform::host());
     for (key, value) in source.as_map() {
-        out.insert(key, neotales_env::interpolate(value, &out));
+        let next = if inline_keys.iter().any(|name| keys_equal(name, key)) {
+            neotales_env::interpolate(value, &out)
+        } else {
+            value.clone()
+        };
+        out.insert(key, next);
     }
     out.remove("VAELRUN_DETACHED");
     out
@@ -357,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn expands_in_order_and_keeps_single_quotes() {
+    fn dotenv_values_stay_literal() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".env");
         fs::write(
@@ -366,9 +375,9 @@ mod tests {
         )
         .unwrap();
         let env = build_env(&[], &[path], &[], &[], dir.path(), None).unwrap();
-        assert_eq!(env.get("FOO"), Some("there"));
-        assert_eq!(env.get("KEEP"), Some("a "));
-        assert_eq!(env.get("LIT"), Some("there"));
+        assert_eq!(env.get("FOO"), Some("${BAR}"));
+        assert_eq!(env.get("KEEP"), Some("a $b"));
+        assert_eq!(env.get("LIT"), Some("${BAR}"));
     }
 
     #[test]
