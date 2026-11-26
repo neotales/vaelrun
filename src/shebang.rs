@@ -25,6 +25,8 @@ const SAMPLE: usize = 512;
 #[derive(Debug)]
 pub(crate) struct Probe {
     pub binary: bool,
+    /// The sample starts with a NUL, so it is not an ELF, Mach-O, or PE image.
+    pub leading_nul: bool,
     pub shebang: Option<Shebang>,
 }
 
@@ -38,6 +40,7 @@ pub(crate) fn probe(path: &Path) -> Result<Probe, Error> {
     if sample.contains(&0) {
         return Ok(Probe {
             binary: true,
+            leading_nul: sample.first() == Some(&0),
             shebang: None,
         });
     }
@@ -48,11 +51,13 @@ pub(crate) fn probe(path: &Path) -> Result<Probe, Error> {
             parse_shebang_line(line).map_err(|_| Error::at(path, 1, "invalid shebang"))?;
         return Ok(Probe {
             binary: false,
+            leading_nul: false,
             shebang: Some(shebang),
         });
     }
     Ok(Probe {
         binary: false,
+        leading_nul: false,
         shebang: None,
     })
 }

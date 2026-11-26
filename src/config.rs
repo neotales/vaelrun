@@ -366,7 +366,7 @@ mod tests {
         .unwrap();
         fs::write(
             &second,
-            "[extensions]\n.ts = node $s\n[bin]\n/opt/a\n/opt/b\n[alias]\ncmd = /bin/true\n",
+            "[extensions]\n.ts = node $s\n[bin]\n/opt/a\n/opt/b\n[alias]\ncmd = true\n",
         )
         .unwrap();
         let missing = dir.path().join("missing.ini");

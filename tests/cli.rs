@@ -9,7 +9,25 @@ fn vrun() -> &'static str {
     env!("CARGO_BIN_EXE_vrun")
 }
 
+fn tool(name: &str) -> String {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return candidate.to_string_lossy().into_owned();
+        }
+    }
+    for dir in ["/usr/bin", "/bin"] {
+        let candidate = Path::new(dir).join(name);
+        if candidate.is_file() {
+            return candidate.to_string_lossy().into_owned();
+        }
+    }
+    panic!("{name} is not on PATH");
+}
+
 fn write_exe(path: &Path, body: &str) {
+    let body = body.replacen("#!/bin/sh\n", &format!("#!{}\n", tool("sh")), 1);
     fs::write(path, body).unwrap();
     let mut perms = fs::metadata(path).unwrap().permissions();
     perms.set_mode(0o755);
@@ -41,7 +59,7 @@ fn unknown_shell_is_usage() {
 #[test]
 fn child_exit_code_is_propagated() {
     let out = Command::new(vrun())
-        .args(["/bin/sh", "-c", "exit 42"])
+        .args([tool("sh"), "-c".into(), "exit 42".into()])
         .env_remove("VAELRUN_CONFIG")
         .output()
         .unwrap();
@@ -66,7 +84,7 @@ fn trust_refuses_path_only_and_allows_absolute() {
     assert!(err.to_ascii_lowercase().contains("trust"), "{err}");
 
     let allowed = Command::new(vrun())
-        .args(["/bin/true"])
+        .args([tool("true")])
         .env_remove("VAELRUN_CONFIG")
         .output()
         .unwrap();
@@ -88,9 +106,9 @@ fn inline_overrides_dotenv_and_parent_reaches_child() {
         .arg("MY_VAR=from-inline")
         .arg(&envfile)
         .args([
-            "/bin/sh",
-            "-c",
-            "printf '%s\\n%s\\n%s' \"$MY_VAR\" \"$OTHER\" \"$PARENT_VAR\"",
+            tool("sh"),
+            "-c".into(),
+            "printf '%s\\n%s\\n%s' \"$MY_VAR\" \"$OTHER\" \"$PARENT_VAR\"".into(),
         ])
         .env("PARENT_VAR", "from-parent")
         .env_remove("VAELRUN_CONFIG")
@@ -116,7 +134,7 @@ fn dotenv_path_is_not_a_command_argument() {
     let out = Command::new(vrun())
         .arg("--no-trust")
         .arg(&envfile)
-        .args(["/bin/sh", "-c", "printf '%s' \"$0\""])
+        .args([tool("sh"), "-c".into(), "printf '%s' \"$0\"".into()])
         .env_remove("VAELRUN_CONFIG")
         .output()
         .unwrap();
@@ -126,7 +144,7 @@ fn dotenv_path_is_not_a_command_argument() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(String::from_utf8(out.stdout).unwrap(), "/bin/sh");
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), tool("sh"));
 }
 
 #[test]
@@ -190,7 +208,9 @@ fn directory_open_uses_the_opener_seam() {
 fn vrun_script_and_or_and_pipe() {
     let dir = tempfile::tempdir().unwrap();
     let ok = dir.path().join("ok.vrun");
-    fs::write(&ok, "/bin/true && /bin/false || /bin/true\n").unwrap();
+    let true_bin = tool("true");
+    let false_bin = tool("false");
+    fs::write(&ok, format!("{true_bin} && {false_bin} || {true_bin}\n")).unwrap();
     let out = Command::new(vrun())
         .arg(&ok)
         .env_remove("VAELRUN_CONFIG")
@@ -204,7 +224,7 @@ fn vrun_script_and_or_and_pipe() {
     );
 
     let fail = dir.path().join("fail.vrun");
-    fs::write(&fail, "/bin/false && /bin/true\n").unwrap();
+    fs::write(&fail, format!("{false_bin} && {true_bin}\n")).unwrap();
     let out = Command::new(vrun())
         .arg(&fail)
         .env_remove("VAELRUN_CONFIG")
@@ -218,7 +238,9 @@ fn vrun_script_and_or_and_pipe() {
     );
 
     let piped = dir.path().join("pipe.vrun");
-    fs::write(&piped, "/usr/bin/printf hello | /bin/cat\n").unwrap();
+    let printf_bin = tool("printf");
+    let cat_bin = tool("cat");
+    fs::write(&piped, format!("{printf_bin} hello | {cat_bin}\n")).unwrap();
     let out = Command::new(vrun())
         .arg(&piped)
         .env_remove("VAELRUN_CONFIG")
@@ -244,7 +266,7 @@ fn sudo_prefixes_each_pipeline_stage() {
     write_exe(
         &sudo,
         &format!(
-            "#!/bin/sh\nexec 9>>'{log_disp}.lock'\nflock 9\n{{\nprintf '%s' \"$0\"\nfor arg in \"$@\"; do printf ' %s' \"$arg\"; done\nprintf '\\n'\n}} >> '{log_disp}'\nexit 0\n"
+            "#!/bin/sh\nout='{log_disp}.'$$\nprintf '%s' \"$0\" > \"$out\"\nfor arg in \"$@\"; do printf ' %s' \"$arg\" >> \"$out\"; done\nprintf '\\n' >> \"$out\"\nexit 0\n"
         ),
     );
     let cfg = dir.path().join("config.ini");
@@ -254,7 +276,10 @@ fn sudo_prefixes_each_pipeline_stage() {
     fs::write(
         &script,
         format!(
-            "/usr/bin/printf hello | /bin/cat\n/bin/true > {}\n",
+            "{} hello | {}\n{} > {}\n",
+            tool("printf"),
+            tool("cat"),
+            tool("true"),
             out_file.display()
         ),
     )
@@ -271,7 +296,14 @@ fn sudo_prefixes_each_pipeline_stage() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let logged = fs::read_to_string(&log).unwrap();
+    let mut logged = String::new();
+    for entry in fs::read_dir(dir.path()).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy();
+        if name.starts_with("argv.") {
+            logged.push_str(&fs::read_to_string(&path).unwrap());
+        }
+    }
     let lines: Vec<_> = logged.lines().filter(|line| !line.is_empty()).collect();
     assert_eq!(lines.len(), 3, "{logged}");
     let sudo_disp = sudo.display().to_string();
@@ -284,7 +316,8 @@ fn sudo_prefixes_each_pipeline_stage() {
 fn sudo_trust_refusal_on_a_pipeline_is_126() {
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("pipe.vrun");
-    fs::write(&script, "/bin/true | /bin/true\n").unwrap();
+    let true_bin = tool("true");
+    fs::write(&script, format!("{true_bin} | {true_bin}\n")).unwrap();
     let out = Command::new(vrun())
         .arg("--sudo")
         .arg(&script)
@@ -306,12 +339,16 @@ fn sudo_trust_refusal_on_a_pipeline_is_126() {
 fn pass_through_injector_keeps_dotenv_literal() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = dir.path().join("config.ini");
-    fs::write(&cfg, "[secrets]\ninjector = /bin/cat\n").unwrap();
+    fs::write(&cfg, format!("[secrets]\ninjector = {}\n", tool("cat"))).unwrap();
     let envfile = dir.path().join("file.env");
     fs::write(&envfile, "HOME=/from/file\nLIT='${HOME}'\nVAR=${HOME}\n").unwrap();
     let out = Command::new(vrun())
         .arg(&envfile)
-        .args(["/bin/sh", "-c", "printf '%s|%s' \"$LIT\" \"$VAR\""])
+        .args([
+            tool("sh"),
+            "-c".into(),
+            "printf '%s|%s' \"$LIT\" \"$VAR\"".into(),
+        ])
         .env("VAELRUN_CONFIG", &cfg)
         .output()
         .unwrap();
@@ -331,7 +368,7 @@ fn dotenv_braced_refs_stay_literal() {
     fs::write(&envfile, "BAR=there\nFOO=${BAR}\n").unwrap();
     let out = Command::new(vrun())
         .arg(&envfile)
-        .args(["/bin/sh", "-c", "printf '%s' \"$FOO\""])
+        .args([tool("sh"), "-c".into(), "printf '%s' \"$FOO\"".into()])
         .env_remove("VAELRUN_CONFIG")
         .output()
         .unwrap();
@@ -351,7 +388,7 @@ fn single_quoted_dotenv_value_stays_literal() {
     fs::write(&envfile, "BAR=there\nFOO='${BAR}'\n").unwrap();
     let out = Command::new(vrun())
         .arg(&envfile)
-        .args(["/bin/sh", "-c", "printf '%s' \"$FOO\""])
+        .args([tool("sh"), "-c".into(), "printf '%s' \"$FOO\"".into()])
         .env_remove("VAELRUN_CONFIG")
         .output()
         .unwrap();
@@ -371,7 +408,7 @@ fn inline_assignment_expands_but_dotenv_does_not() {
     fs::write(&envfile, "MY_VAR=${HOME}\n").unwrap();
     let from_file = Command::new(vrun())
         .arg(&envfile)
-        .args(["/bin/sh", "-c", "printf '%s' \"$MY_VAR\""])
+        .args([tool("sh"), "-c".into(), "printf '%s' \"$MY_VAR\"".into()])
         .env("HOME", "/from/shell")
         .env_remove("VAELRUN_CONFIG")
         .output()
@@ -386,7 +423,7 @@ fn inline_assignment_expands_but_dotenv_does_not() {
 
     let from_argv = Command::new(vrun())
         .arg("MY_VAR=${HOME}")
-        .args(["/bin/sh", "-c", "printf '%s' \"$MY_VAR\""])
+        .args([tool("sh"), "-c".into(), "printf '%s' \"$MY_VAR\"".into()])
         .env("HOME", "/from/shell")
         .env_remove("VAELRUN_CONFIG")
         .output()
@@ -404,7 +441,7 @@ fn inline_assignment_expands_but_dotenv_does_not() {
 fn inline_unquoted_dollar_expands() {
     let out = Command::new(vrun())
         .arg("MY_VAR=$HOME")
-        .args(["/bin/sh", "-c", "printf '%s' \"$MY_VAR\""])
+        .args([tool("sh"), "-c".into(), "printf '%s' \"$MY_VAR\"".into()])
         .env("HOME", "/from/shell")
         .env_remove("VAELRUN_CONFIG")
         .output()
@@ -442,7 +479,7 @@ fn injector_replaces_env_and_still_expands() {
         .arg("INLINE_VAR=from-inline")
         .arg(&envfile)
         .args([
-            "/bin/sh",
+            tool("sh").as_str(),
             "-c",
             "printf '%s|%s|%s' \"$EXPANDED\" \"$LITERAL\" \"$FILE_VAR\"",
         ])
@@ -478,7 +515,7 @@ fn injector_failure_does_not_run_the_child() {
     .unwrap();
     let out = Command::new(vrun())
         .args([
-            "/bin/sh",
+            tool("sh").as_str(),
             "-c",
             &format!("printf x > '{}'", marker.display()),
         ])
@@ -510,7 +547,7 @@ fn trust_refuses_path_only_injector() {
     let path = std::env::var("PATH").unwrap_or_default();
     let out = Command::new(vrun())
         .args([
-            "/bin/sh",
+            tool("sh").as_str(),
             "-c",
             &format!("printf x > '{}'", marker.display()),
         ])
@@ -797,7 +834,7 @@ fn alias_to_ps1_uses_the_builder_and_appends_args() {
 fn alias_to_vrun_file_runs_the_line() {
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("cmd.vrun");
-    fs::write(&script, "/bin/echo aliased\n").unwrap();
+    fs::write(&script, format!("{} aliased\n", tool("echo"))).unwrap();
     let cfg = dir.path().join("config.ini");
     fs::write(&cfg, "[alias]\nship = ./cmd.vrun\n").unwrap();
     let out = Command::new(vrun())
@@ -863,7 +900,7 @@ fn help_before_the_command_prints_usage() {
 #[test]
 fn help_after_the_command_is_an_argument() {
     let out = Command::new(vrun())
-        .args(["/bin/echo", "-h"])
+        .args([tool("echo"), "-h".into()])
         .env_remove("VAELRUN_CONFIG")
         .output()
         .unwrap();

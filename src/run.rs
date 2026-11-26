@@ -285,11 +285,21 @@ fn dispatch_file(
     {
         return run_extension(suffix, path, args, detach, original, ctx);
     }
-    if suffix.is_none()
-        && probed.as_ref().is_some_and(|item| item.binary)
-        && resolve::is_executable(path)
-    {
-        return exec_path(path, args, detach, original, ctx);
+    if suffix.is_none() && probed.as_ref().is_some_and(|item| item.binary) {
+        let leading_nul = probed.as_ref().is_some_and(|item| item.leading_nul);
+        // A +x binary is a program. Spawn it. ENOEXEC is the result, not an open.
+        // EACCES means the file is not executable, so implicit mode may still open it.
+        // macOS posix_spawn can report a rejected image as child status 127, or as
+        // success after handing the file to Launch Services. A leading NUL is not an
+        // image that ran.
+        match exec_path(path, args, detach, original, ctx) {
+            Ok(_) if leading_nul => {
+                return Err(Error::cannot_execute(&path.display().to_string()));
+            }
+            Ok(code) => return Ok(code),
+            Err(err) if denied_execute(&err) && !matches!(mode, Mode::Run) => {}
+            Err(err) => return Err(err),
+        }
     }
     if matches!(mode, Mode::Run) {
         return Err(Error::cannot_execute(&path.display().to_string()));
@@ -360,6 +370,10 @@ fn is_script_suffix(suffix: &str, ctx: &Ctx<'_>) -> bool {
 
 fn starting_app(token: &OsStr, ctx: &Ctx<'_>, mode: Mode) -> bool {
     matches!(mode, Mode::Start) && resolve_app(token, ctx).is_some()
+}
+
+fn denied_execute(err: &Error) -> bool {
+    err.code == 126 && err.message.starts_with("cannot execute")
 }
 
 fn exec_path(
