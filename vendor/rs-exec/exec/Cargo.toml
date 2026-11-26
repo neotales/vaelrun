@@ -1,0 +1,15 @@
+[package]
+name = "neotales-exec"
+description = "Run external commands and pipelines with owned, chainable builders and no shell evaluation"
+version = "0.0.0-alpha.0"
+edition = "2024"
+rust-version = "1.100"
+license = "MIT"
+repository = "https://github.com/neotales/rs-exec"
+authors = ["x0craft"]
+readme = "README.md"
+keywords = ["process", "command", "pipeline", "subprocess"]
+categories = ["os", "command-line-interface"]
+
+[dependencies]
+neotales-args = "=0.0.0-alpha.1"

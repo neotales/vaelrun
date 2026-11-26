@@ -321,6 +321,17 @@ fn run_shebang(
     original: &OsStr,
     ctx: &Ctx<'_>,
 ) -> Result<i32, Error> {
+    if let Some(name) = runtime_name(&shebang.interpreter) {
+        let script_text = script.to_string_lossy();
+        let extra = owned_args(args);
+        let extra_refs = refs_of(&extra);
+        let shell_args = shebang.args.clone();
+        let shell_refs = refs_of(&shell_args);
+        if let Some(cmd) = runtime_shebang(name, &script_text, &shell_refs, &extra_refs) {
+            let argv = authorize_builder(cmd, ctx)?;
+            return finish(argv, detach, original, ctx);
+        }
+    }
     let interp = match shebang::classify_interp(&shebang.interpreter) {
         shebang::Interp::Absolute(path) => path,
         shebang::Interp::Name(name) => {
@@ -351,7 +362,12 @@ fn is_builtin(suffix: &str) -> bool {
             | ".sh"
             | ".go"
             | ".cs"
+            | ".csx"
+            | ".dll"
+            | ".exe"
             | ".csproj"
+            | ".fsproj"
+            | ".vbproj"
             | ".py"
             | ".rb"
     )
@@ -380,81 +396,171 @@ fn run_extension(
     finish(argv, detach, original, ctx)
 }
 
-enum Found {
-    Path(PathBuf),
-    Refused,
-    Missing,
-}
-
-fn classify(name: &str, ctx: &Ctx<'_>) -> Found {
-    match ctx.finder.lookup(name) {
-        None => Found::Missing,
-        Some(hit) if !hit.allowed(ctx.trust_on) => Found::Refused,
-        Some(hit) => Found::Path(hit.into_path()),
-    }
-}
-
-fn pick(primary: &str, fallback: Option<&str>, ctx: &Ctx<'_>) -> Result<PathBuf, Error> {
-    match classify(primary, ctx) {
-        Found::Path(path) => Ok(path),
-        Found::Refused => Err(Error::trust(primary)),
-        Found::Missing => match fallback {
-            None => Err(Error::not_found(primary)),
-            Some(alt) => match classify(alt, ctx) {
-                Found::Path(path) => Ok(path),
-                Found::Refused => Err(Error::trust(alt)),
-                Found::Missing => Err(Error::not_found(primary)),
-            },
-        },
-    }
-}
-
 fn builtin_argv(
     suffix: &str,
     file: &Path,
     extras: &[OsString],
     ctx: &Ctx<'_>,
 ) -> Result<Vec<OsString>, Error> {
-    let file_arg = file.as_os_str().to_os_string();
-    let mut argv = match suffix {
-        ".ts" | ".tsx" => vec![pick("bun", None, ctx)?.into(), file_arg],
-        ".js" | ".mjs" | ".cjs" => vec![pick("bun", Some("node"), ctx)?.into(), file_arg],
-        ".ps1" => {
-            let prog = pick("pwsh", Some("powershell"), ctx)?;
-            vec![
-                prog.into(),
-                OsString::from("-ExecutionPolicy"),
-                OsString::from("RemoteSigned"),
-                OsString::from("-NoLogo"),
-                OsString::from("-File"),
-                file_arg,
-            ]
+    let path = file.to_string_lossy();
+    let extra = owned_args(extras);
+    let extra_refs = refs_of(&extra);
+    let cmd = match suffix {
+        ".sh" => shell_script(&path, &extra_refs),
+        ".ps1" => powershell_script(&path, &extra_refs),
+        ".ts" | ".tsx" => neotales_exec_script::bun::file(&path, extra_refs.iter().copied()),
+        ".js" | ".mjs" | ".cjs" => javascript_script(&path, &extra_refs),
+        ".go" => neotales_exec_script::golang::file(&path, extra_refs.iter().copied()),
+        ".cs" | ".csx" | ".dll" | ".exe" | ".csproj" | ".fsproj" | ".vbproj" => {
+            neotales_exec_script::dotnet::file(&path, extra_refs.iter().copied())
         }
-        ".sh" => vec![pick("bash", Some("sh"), ctx)?.into(), file_arg],
-        ".go" => vec![
-            pick("go", None, ctx)?.into(),
-            OsString::from("run"),
-            file_arg,
-        ],
-        ".cs" => vec![
-            pick("dotnet", None, ctx)?.into(),
-            OsString::from("run"),
-            file_arg,
-            OsString::from("--"),
-        ],
-        ".csproj" => vec![
-            pick("dotnet", None, ctx)?.into(),
-            OsString::from("run"),
-            OsString::from("--project"),
-            file_arg,
-            OsString::from("--"),
-        ],
-        ".py" => vec![pick("python3", Some("python"), ctx)?.into(), file_arg],
-        ".rb" => vec![pick("ruby", None, ctx)?.into(), file_arg],
+        ".py" => neotales_exec_script::python::file(&path, extra_refs.iter().copied()),
+        ".rb" => neotales_exec_script::ruby::file(&path, extra_refs.iter().copied()),
         _ => return Err(Error::not_found(suffix)),
     };
-    argv.extend(extras.iter().cloned());
+    authorize_builder(cmd, ctx)
+}
+
+/// `find` only accepts a registered absolute candidate. A bare name left by the
+/// builder is resolved here, so trust still refuses a PATH-only hit.
+fn authorize_builder(cmd: neotales_exec::Command, ctx: &Ctx<'_>) -> Result<Vec<OsString>, Error> {
+    let resolved = authorize_runtime(cmd.program(), ctx)?;
+    let mut argv = vec![resolved.into()];
+    argv.extend(cmd.arguments().iter().cloned());
     Ok(argv)
+}
+
+fn authorize_runtime(program: &OsStr, ctx: &Ctx<'_>) -> Result<PathBuf, Error> {
+    let path = Path::new(program);
+    if path.is_absolute() {
+        if path.is_file() {
+            return Ok(path.to_path_buf());
+        }
+        return Err(Error::not_found(&program.to_string_lossy()));
+    }
+    resolve::resolve_program(program, ctx.finder, ctx.cwd, ctx.trust_on)
+}
+
+fn runtime_resolved(cmd: &neotales_exec::Command, name: &str) -> bool {
+    let program = cmd.program();
+    program != OsStr::new(name) && Path::new(program).is_absolute()
+}
+
+fn shell_script(path: &str, args: &[&str]) -> neotales_exec::Command {
+    let bash = neotales_exec_script::bash::file(path, args.iter().copied());
+    if runtime_resolved(&bash, "bash") || neotales_exec::find("bash", None).is_ok() {
+        bash
+    } else {
+        neotales_exec_script::sh::file(path, args.iter().copied())
+    }
+}
+
+fn powershell_script(path: &str, args: &[&str]) -> neotales_exec::Command {
+    let pwsh = neotales_exec_script::pwsh::file(path, args.iter().copied());
+    if runtime_resolved(&pwsh, "pwsh") || neotales_exec::find("pwsh", None).is_ok() {
+        pwsh
+    } else {
+        neotales_exec_script::powershell::file(path, args.iter().copied())
+    }
+}
+
+fn javascript_script(path: &str, args: &[&str]) -> neotales_exec::Command {
+    let bun = neotales_exec_script::bun::file(path, args.iter().copied());
+    if runtime_resolved(&bun, "bun") || neotales_exec::find("bun", None).is_ok() {
+        bun
+    } else {
+        neotales_exec_script::node::file(path, args.iter().copied())
+    }
+}
+
+fn runtime_name(interpreter: &str) -> Option<&'static str> {
+    let base = Path::new(interpreter)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(interpreter);
+    let base = base.strip_suffix(".exe").unwrap_or(base);
+    match base {
+        "bash" => Some("bash"),
+        "sh" => Some("sh"),
+        "zsh" => Some("zsh"),
+        "pwsh" => Some("pwsh"),
+        "powershell" => Some("powershell"),
+        "python" | "python3" => Some("python"),
+        "ruby" => Some("ruby"),
+        "node" => Some("node"),
+        "bun" => Some("bun"),
+        "deno" => Some("deno"),
+        _ => None,
+    }
+}
+
+fn runtime_shebang(
+    name: &str,
+    script: &str,
+    shell_args: &[&str],
+    extras: &[&str],
+) -> Option<neotales_exec::Command> {
+    use neotales_exec_script::{bash, bun, deno, node, powershell, pwsh, python, ruby, sh, zsh};
+    let cmd = match name {
+        "bash" if shell_args.is_empty() => bash::file(script, extras.iter().copied()),
+        "bash" => {
+            bash::file_with_shell_args(script, shell_args.iter().copied(), extras.iter().copied())
+        }
+        "sh" if shell_args.is_empty() => sh::file(script, extras.iter().copied()),
+        "sh" => {
+            sh::file_with_shell_args(script, shell_args.iter().copied(), extras.iter().copied())
+        }
+        "zsh" if shell_args.is_empty() => zsh::file(script, extras.iter().copied()),
+        "zsh" => {
+            zsh::file_with_shell_args(script, shell_args.iter().copied(), extras.iter().copied())
+        }
+        "pwsh" if shell_args.is_empty() => pwsh::file(script, extras.iter().copied()),
+        "pwsh" => {
+            pwsh::file_with_shell_args(script, shell_args.iter().copied(), extras.iter().copied())
+        }
+        "powershell" if shell_args.is_empty() => powershell::file(script, extras.iter().copied()),
+        "powershell" => powershell::file_with_shell_args(
+            script,
+            shell_args.iter().copied(),
+            extras.iter().copied(),
+        ),
+        "deno" if shell_args.is_empty() => deno::file(script, extras.iter().copied()),
+        "deno" => {
+            deno::file_with_shell_args(script, shell_args.iter().copied(), extras.iter().copied())
+        }
+        "python" if shell_args.is_empty() => python::file(script, extras.iter().copied()),
+        "python" => python::new(std::iter::empty())
+            .args(shell_args.iter().copied())
+            .arg(script)
+            .args(extras.iter().copied()),
+        "node" if shell_args.is_empty() => node::file(script, extras.iter().copied()),
+        "node" => node::new(std::iter::empty())
+            .args(shell_args.iter().copied())
+            .arg(script)
+            .args(extras.iter().copied()),
+        "bun" if shell_args.is_empty() => bun::file(script, extras.iter().copied()),
+        "bun" => bun::new(std::iter::empty())
+            .args(shell_args.iter().copied())
+            .arg(script)
+            .args(extras.iter().copied()),
+        "ruby" if shell_args.is_empty() => ruby::file(script, extras.iter().copied()),
+        "ruby" => ruby::new(std::iter::empty())
+            .args(shell_args.iter().copied())
+            .arg(script)
+            .args(extras.iter().copied()),
+        _ => return None,
+    };
+    Some(cmd)
+}
+
+fn owned_args(args: &[OsString]) -> Vec<String> {
+    args.iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect()
+}
+
+fn refs_of(args: &[String]) -> Vec<&str> {
+    args.iter().map(String::as_str).collect()
 }
 
 fn edit(path: &Path, ctx: &Ctx<'_>) -> Result<i32, Error> {

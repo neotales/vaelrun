@@ -1,0 +1,21 @@
+[package]
+name = "neotales-exec-script"
+description = "Build neotales-exec commands for bash, sh, node, bun, Go, .NET, PowerShell and cmd scripts"
+version = "0.0.0-alpha.0"
+edition = "2024"
+rust-version = "1.100"
+license = "MIT"
+repository = "https://github.com/neotales/rs-exec"
+authors = ["x0craft"]
+readme = "README.md"
+keywords = ["script", "runtime", "bash", "node", "dotnet"]
+categories = ["os", "command-line-utilities"]
+
+[dependencies]
+neotales-exec = { path = "../exec", version = "0.0.0-alpha.0" }
+getrandom = { version = "0.2", features = ["std"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["process"] }
+
+
