@@ -300,7 +300,7 @@ fn sudo_trust_refusal_on_a_pipeline_is_126() {
 }
 
 #[test]
-fn pass_through_injector_keeps_single_quotes_literal() {
+fn pass_through_injector_expands_single_quotes() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = dir.path().join("config.ini");
     fs::write(&cfg, "[secrets]\ninjector = /bin/cat\n").unwrap();
@@ -318,7 +318,10 @@ fn pass_through_injector_keeps_single_quotes_literal() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(String::from_utf8(out.stdout).unwrap(), "${HOME}|/from/file");
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "/from/file|/from/file"
+    );
 }
 
 #[test]
@@ -342,7 +345,7 @@ fn dotenv_expands_braced_refs_in_order() {
 }
 
 #[test]
-fn single_quoted_dotenv_value_stays_literal() {
+fn single_quoted_dotenv_value_expands() {
     let dir = tempfile::tempdir().unwrap();
     let envfile = dir.path().join(".env");
     fs::write(&envfile, "BAR=there\nFOO='${BAR}'\n").unwrap();
@@ -358,7 +361,7 @@ fn single_quoted_dotenv_value_stays_literal() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(String::from_utf8(out.stdout).unwrap(), "${BAR}");
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "there");
 }
 
 #[test]
@@ -401,7 +404,7 @@ fn injector_replaces_env_and_still_expands() {
     );
     assert_eq!(
         String::from_utf8(out.stdout).unwrap(),
-        "/from-injector|${HOME}|"
+        "/from-injector|/from-injector|"
     );
     let seen = fs::read_to_string(&stdin_log).unwrap();
     let parent = seen.find("PARENT_VAR=from-parent").expect(&seen);

@@ -144,20 +144,19 @@ pub(crate) fn build_env(
         }
     }
 
-    let expanded = expand(env, &quotes);
+    let expanded = expand(env);
     Ok(EnvMap::from_environment(&expanded, non_utf8))
 }
 
-fn expand(source: Environment, quotes: &HashMap<String, QuoteStyle>) -> Environment {
+/// Expand every value, including single-quoted and raw ones.
+///
+/// A shell strips the quotes around an inline assignment and expands double
+/// quotes itself, so a value that still contains `$NAME` arrived quoted. vrun
+/// is the process that must expand it.
+fn expand(source: Environment) -> Environment {
     let mut out = Environment::new(Platform::host());
     for (key, value) in source.as_map() {
-        let literal = matches!(quotes.get(key), Some(QuoteStyle::Single | QuoteStyle::Raw));
-        let next = if literal {
-            value.clone()
-        } else {
-            neotales_env::interpolate(value, &out)
-        };
-        out.insert(key, next);
+        out.insert(key, neotales_env::interpolate(value, &out));
     }
     out.remove("VAELRUN_DETACHED");
     out
@@ -369,7 +368,7 @@ mod tests {
         let env = build_env(&[], &[path], &[], &[], dir.path(), None).unwrap();
         assert_eq!(env.get("FOO"), Some("there"));
         assert_eq!(env.get("KEEP"), Some("a "));
-        assert_eq!(env.get("LIT"), Some("${BAR}"));
+        assert_eq!(env.get("LIT"), Some("there"));
     }
 
     #[test]
