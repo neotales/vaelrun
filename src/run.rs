@@ -293,11 +293,18 @@ fn finish(
     }
     let program = PathBuf::from(&argv[0]);
     let detach = detach_flag || listed(&program, original, &ctx.config.detach);
-    if ctx.sudo {
-        let sudo = resolve::resolve_program(OsStr::new("sudo"), ctx.finder, ctx.cwd, ctx.trust_on)?;
+    if let Some(sudo) = resolve_sudo(ctx)? {
         argv.insert(0, sudo.into());
     }
     spawn(&argv, ctx, detach)
+}
+
+/// Resolve `sudo` once. A PATH-only hit is refused with 126 when trust is on.
+fn resolve_sudo(ctx: &Ctx<'_>) -> Result<Option<PathBuf>, Error> {
+    if !ctx.sudo {
+        return Ok(None);
+    }
+    resolve::resolve_program(OsStr::new("sudo"), ctx.finder, ctx.cwd, ctx.trust_on).map(Some)
 }
 
 fn run_shebang(
@@ -590,12 +597,27 @@ struct Prepared {
 }
 
 fn spawn_pipeline(cmds: &[Prepared], ctx: &Ctx<'_>) -> Result<i32, Error> {
+    // One resolution for the whole pipeline. Each stage is prefixed; the
+    // script interpreter is not wrapped.
+    let sudo = resolve_sudo(ctx)?;
     let mut children = Vec::new();
     let mut previous: Option<std::process::ChildStdout> = None;
     for (idx, spec) in cmds.iter().enumerate() {
         let last = idx + 1 == cmds.len();
-        let mut cmd = Command::new(&spec.program);
-        cmd.args(&spec.args);
+        let launched = sudo.as_deref().unwrap_or(spec.program.as_path());
+        let mut cmd = match &sudo {
+            Some(sudo) => {
+                let mut cmd = Command::new(sudo);
+                cmd.arg(&spec.program);
+                cmd.args(&spec.args);
+                cmd
+            }
+            None => {
+                let mut cmd = Command::new(&spec.program);
+                cmd.args(&spec.args);
+                cmd
+            }
+        };
         apply_child(&mut cmd, ctx);
         if let Some(out) = previous.take() {
             if last && spec.stdin.is_some() {
@@ -629,7 +651,7 @@ fn spawn_pipeline(cmds: &[Prepared], ctx: &Ctx<'_>) -> Result<i32, Error> {
             }
             Err(err) => {
                 kill_children(&mut children);
-                return Err(map_spawn(&spec.program, err));
+                return Err(map_spawn(launched, err));
             }
         }
     }

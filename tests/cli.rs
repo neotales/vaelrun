@@ -229,3 +229,72 @@ fn vrun_script_and_or_and_pipe() {
     );
     assert_eq!(String::from_utf8(out.stdout).unwrap(), "hello");
 }
+
+#[test]
+fn sudo_prefixes_each_pipeline_stage() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let log = dir.path().join("argv");
+    let sudo = bin.join("sudo");
+    let log_disp = log.display().to_string();
+    write_exe(
+        &sudo,
+        &format!(
+            "#!/bin/sh\nexec 9>>'{log_disp}.lock'\nflock 9\n{{\nprintf '%s' \"$0\"\nfor arg in \"$@\"; do printf ' %s' \"$arg\"; done\nprintf '\\n'\n}} >> '{log_disp}'\nexit 0\n"
+        ),
+    );
+    let cfg = dir.path().join("config.ini");
+    fs::write(&cfg, format!("[bin]\n{}\n", bin.display())).unwrap();
+    let out_file = dir.path().join("out.txt");
+    let script = dir.path().join("pipe.vrun");
+    fs::write(
+        &script,
+        format!(
+            "/usr/bin/printf hello | /bin/cat\n/bin/true > {}\n",
+            out_file.display()
+        ),
+    )
+    .unwrap();
+    let out = Command::new(vrun())
+        .arg("--sudo")
+        .arg(&script)
+        .env("VAELRUN_CONFIG", &cfg)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let logged = fs::read_to_string(&log).unwrap();
+    let lines: Vec<_> = logged.lines().filter(|line| !line.is_empty()).collect();
+    assert_eq!(lines.len(), 3, "{logged}");
+    let sudo_disp = sudo.display().to_string();
+    for line in lines {
+        assert!(line.starts_with(&sudo_disp), "{line}");
+    }
+}
+
+#[test]
+fn sudo_trust_refusal_on_a_pipeline_is_126() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("pipe.vrun");
+    fs::write(&script, "/bin/true | /bin/true\n").unwrap();
+    let out = Command::new(vrun())
+        .arg("--sudo")
+        .arg(&script)
+        .env_remove("VAELRUN_CONFIG")
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(126),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("sudo"), "{err}");
+    assert!(err.to_ascii_lowercase().contains("trust"), "{err}");
+}
