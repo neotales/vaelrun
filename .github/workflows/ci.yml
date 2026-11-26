@@ -52,6 +52,28 @@ jobs:
       - name: Release binary
         run: cargo build --release -p vaelrun-cli
 
+      - name: Smoke the release binary
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$(target/release/vrun --version)"
+          printf '%s\n' "$out"
+          case "$out" in
+            *vaelrun*) ;;
+            *) echo "release binary stdout missing vaelrun" >&2; exit 1 ;;
+          esac
+
+      - name: Smoke the release binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = & 'target\release\vrun.exe' --version
+          if ($LASTEXITCODE -ne 0) { throw "vrun --version exited $LASTEXITCODE" }
+          Write-Output $out
+          if ($out -notmatch 'vaelrun') { throw 'release binary stdout missing vaelrun' }
+
   scripts:
     name: scripts
     runs-on: ubuntu-24.04
