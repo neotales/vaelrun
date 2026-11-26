@@ -64,17 +64,23 @@ pub(crate) fn run(opts: RunOptions) -> Result<i32, Error> {
         extra.as_deref(),
     );
     let config = config::load_config(&paths)?;
-    let dotenv = dotenv::load_dotenv_files(&inv.dotenv)?;
-    let env = dotenv::merge_env(
-        std::env::vars_os().collect(),
-        dotenv,
+    let trust_on = inv.trust.unwrap_or_else(|| config.trust_on());
+    let bin_dirs = expand_bins(&config, home.as_deref(), &inv.cwd);
+    let parent: Vec<_> = std::env::vars_os().collect();
+    let parent_finder = build_finder(&bin_dirs, &dotenv::parent_map(&parent));
+    let injector = resolve_injector(&config, &parent_finder, &inv.cwd, trust_on)?;
+    let env = dotenv::build_env(
+        &parent,
+        &inv.dotenv,
         &inv.unset,
         &inv.inline,
-        cfg!(windows),
-    );
-    let bin_dirs = expand_bins(&config, home.as_deref(), &inv.cwd);
+        &inv.cwd,
+        injector.as_ref().map(|item| dotenv::Injector {
+            argv: &item.argv,
+            program: &item.program,
+        }),
+    )?;
     let finder = build_finder(&bin_dirs, &env);
-    let trust_on = inv.trust.unwrap_or_else(|| config.trust_on());
     let skip_detach = std::env::var_os("VAELRUN_DETACHED").as_deref() == Some(OsStr::new("1"));
     let ctx = Ctx {
         cwd: &inv.cwd,
@@ -863,6 +869,27 @@ fn exit_code(status: ExitStatus) -> i32 {
         }
     }
     1
+}
+
+struct ResolvedInjector {
+    argv: Vec<String>,
+    program: PathBuf,
+}
+
+fn resolve_injector(
+    config: &Config,
+    finder: &Finder,
+    cwd: &Path,
+    trust_on: bool,
+) -> Result<Option<ResolvedInjector>, Error> {
+    let Some(argv) = config.injector_argv() else {
+        return Ok(None);
+    };
+    let program = resolve::resolve_program(OsStr::new(&argv[0]), finder, cwd, trust_on)?;
+    Ok(Some(ResolvedInjector {
+        argv: argv.to_vec(),
+        program,
+    }))
 }
 
 fn expand_bins(config: &Config, home: Option<&Path>, cwd: &Path) -> Vec<PathBuf> {

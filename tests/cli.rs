@@ -298,3 +298,158 @@ fn sudo_trust_refusal_on_a_pipeline_is_126() {
     assert!(err.contains("sudo"), "{err}");
     assert!(err.to_ascii_lowercase().contains("trust"), "{err}");
 }
+
+#[test]
+fn dotenv_expands_braced_refs_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let envfile = dir.path().join(".env");
+    fs::write(&envfile, "BAR=there\nFOO=${BAR}\n").unwrap();
+    let out = Command::new(vrun())
+        .arg(&envfile)
+        .args(["/bin/sh", "-c", "printf '%s' \"$FOO\""])
+        .env_remove("VAELRUN_CONFIG")
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "there");
+}
+
+#[test]
+fn single_quoted_dotenv_value_stays_literal() {
+    let dir = tempfile::tempdir().unwrap();
+    let envfile = dir.path().join(".env");
+    fs::write(&envfile, "BAR=there\nFOO='${BAR}'\n").unwrap();
+    let out = Command::new(vrun())
+        .arg(&envfile)
+        .args(["/bin/sh", "-c", "printf '%s' \"$FOO\""])
+        .env_remove("VAELRUN_CONFIG")
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "${BAR}");
+}
+
+#[test]
+fn injector_replaces_env_and_still_expands() {
+    let dir = tempfile::tempdir().unwrap();
+    let stdin_log = dir.path().join("stdin.log");
+    let injector = dir.path().join("injector.sh");
+    write_exe(
+        &injector,
+        &format!(
+            "#!/bin/sh\ncat > '{log}'\ncat <<'END'\nHOME=/from-injector\nEXPANDED=${{HOME}}\nLITERAL='${{HOME}}'\nEND\n",
+            log = stdin_log.display()
+        ),
+    );
+    let cfg = dir.path().join("config.ini");
+    fs::write(
+        &cfg,
+        format!("[secrets]\ninjector = {}\n", injector.display()),
+    )
+    .unwrap();
+    let envfile = dir.path().join("file.env");
+    fs::write(&envfile, "FILE_VAR=from-file\n").unwrap();
+    let out = Command::new(vrun())
+        .arg("INLINE_VAR=from-inline")
+        .arg(&envfile)
+        .args([
+            "/bin/sh",
+            "-c",
+            "printf '%s|%s|%s' \"$EXPANDED\" \"$LITERAL\" \"$FILE_VAR\"",
+        ])
+        .env("PARENT_VAR", "from-parent")
+        .env("VAELRUN_CONFIG", &cfg)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "/from-injector|${HOME}|"
+    );
+    let seen = fs::read_to_string(&stdin_log).unwrap();
+    let parent = seen.find("PARENT_VAR=from-parent").expect(&seen);
+    let file = seen.find("FILE_VAR=from-file").expect(&seen);
+    let inline = seen.find("INLINE_VAR=from-inline").expect(&seen);
+    assert!(parent < file && file < inline, "{seen}");
+}
+
+#[test]
+fn injector_failure_does_not_run_the_child() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("ran");
+    let injector = dir.path().join("injector.sh");
+    write_exe(&injector, "#!/bin/sh\nprintf 'SECRET-CANARY'\nexit 2\n");
+    let cfg = dir.path().join("config.ini");
+    fs::write(
+        &cfg,
+        format!("[secrets]\ninjector = {}\n", injector.display()),
+    )
+    .unwrap();
+    let out = Command::new(vrun())
+        .args([
+            "/bin/sh",
+            "-c",
+            &format!("printf x > '{}'", marker.display()),
+        ])
+        .env("VAELRUN_CONFIG", &cfg)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!marker.exists());
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains(&injector.display().to_string()), "{err}");
+    assert!(err.contains("2"), "{err}");
+    assert!(!err.contains("SECRET-CANARY"), "{err}");
+}
+
+#[test]
+fn trust_refuses_path_only_injector() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let marker = dir.path().join("ran");
+    write_exe(&bin.join("fakeinject"), "#!/bin/sh\nexit 0\n");
+    let cfg = dir.path().join("config.ini");
+    fs::write(&cfg, "[secrets]\ninjector = fakeinject\n").unwrap();
+    let path = std::env::var("PATH").unwrap_or_default();
+    let out = Command::new(vrun())
+        .args([
+            "/bin/sh",
+            "-c",
+            &format!("printf x > '{}'", marker.display()),
+        ])
+        .env("PATH", format!("{}:{path}", bin.display()))
+        .env("VAELRUN_CONFIG", &cfg)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(126),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8(out.stderr).unwrap();
+    assert!(err.contains("fakeinject"), "{err}");
+    assert!(err.to_ascii_lowercase().contains("trust"), "{err}");
+    assert!(!marker.exists());
+}

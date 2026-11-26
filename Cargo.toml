@@ -13,6 +13,8 @@ name = "vrun"
 path = "src/main.rs"
 
 [dependencies]
+neotales-dotenv = { path = "third_party/neotales-dotenv", version = "0.0.0-alpha.1" }
+neotales-env = { path = "third_party/neotales-env", version = "0.0.0-alpha.1" }
 
 [dev-dependencies]
 tempfile = "3.27.0"

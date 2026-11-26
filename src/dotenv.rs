@@ -1,7 +1,12 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+use neotales_dotenv::{Document, QuoteStyle};
+use neotales_env::{Environment, Platform};
 
 use crate::error::Error;
 
@@ -17,168 +22,260 @@ impl EnvMap {
         self.utf8.get(key).map(String::as_str)
     }
 
-    fn rebuild_utf8(&mut self) {
-        self.utf8.clear();
-        for (key, value) in &self.pairs {
-            if let (Some(key), Some(value)) = (key.to_str(), value.to_str()) {
-                self.utf8.insert(key.to_string(), value.to_string());
+    fn from_environment(env: &Environment, non_utf8: Vec<(OsString, OsString)>) -> Self {
+        let mut pairs: Vec<(OsString, OsString)> = env
+            .as_map()
+            .iter()
+            .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+            .collect();
+        for (key, value) in non_utf8 {
+            if !pairs.iter().any(|(existing, _)| existing == &key) {
+                pairs.push((key, value));
             }
         }
+        let mut utf8 = HashMap::new();
+        for (key, value) in env.as_map() {
+            utf8.insert(key.clone(), value.clone());
+        }
+        Self { pairs, utf8 }
     }
 }
 
-/// Parent, then dotenv, then `-u`, then inline assignments.
-pub(crate) fn merge_env(
-    parent: Vec<(OsString, OsString)>,
-    dotenv: impl IntoIterator<Item = (String, String)>,
+/// Parent pairs, skipping the detach mark, for resolving the injector.
+pub(crate) fn parent_map(parent: &[(OsString, OsString)]) -> EnvMap {
+    let mut pairs = Vec::new();
+    let mut utf8 = HashMap::new();
+    for (key, value) in parent {
+        if key.to_str() == Some("VAELRUN_DETACHED") {
+            continue;
+        }
+        pairs.push((key.clone(), value.clone()));
+        if let (Some(key), Some(value)) = (key.to_str(), value.to_str()) {
+            utf8.insert(key.to_string(), value.to_string());
+        }
+    }
+    EnvMap { pairs, utf8 }
+}
+
+/// An injector whose program has already passed the trust resolver.
+pub(crate) struct Injector<'a> {
+    pub argv: &'a [String],
+    pub program: &'a Path,
+}
+
+/// Parent, then dotenv, then `-u`, then inline. An injector may replace that map.
+/// Expansion runs after the injector, against values inserted so far.
+pub(crate) fn build_env(
+    parent: &[(OsString, OsString)],
+    dotenv_files: &[PathBuf],
     unset: &[String],
     inline: &[(String, OsString)],
-    ignore_case: bool,
-) -> EnvMap {
-    let mut pairs: Vec<(OsString, OsString)> = parent
-        .into_iter()
-        .filter(|(key, _)| key.to_str() != Some("VAELRUN_DETACHED"))
-        .collect();
-    for (key, value) in dotenv {
-        upsert(
-            &mut pairs,
-            OsString::from(key),
-            OsString::from(value),
-            ignore_case,
-        );
+    cwd: &Path,
+    injector: Option<Injector<'_>>,
+) -> Result<EnvMap, Error> {
+    let mut env = Environment::new(Platform::host());
+    let mut quotes: HashMap<String, QuoteStyle> = HashMap::new();
+    let mut non_utf8 = Vec::new();
+
+    for (key, value) in parent {
+        if key.to_str() == Some("VAELRUN_DETACHED") {
+            continue;
+        }
+        let (Some(key), Some(value)) = (key.to_str(), value.to_str()) else {
+            non_utf8.push((key.clone(), value.clone()));
+            continue;
+        };
+        put(&mut env, &mut quotes, key, value, None);
+    }
+    for path in dotenv_files {
+        let text = fs::read_to_string(path).map_err(|err| Error::io(path, &err))?;
+        let document = neotales_dotenv::parse(&text);
+        reject_invalid(path, &document)?;
+        for assignment in document.assignments() {
+            put(
+                &mut env,
+                &mut quotes,
+                &assignment.key,
+                &assignment.value,
+                Some(assignment.quote),
+            );
+        }
     }
     for name in unset {
-        remove_key(&mut pairs, name, ignore_case);
+        env.remove(name);
+        quotes.retain(|key, _| !keys_equal(key, name));
     }
     for (key, value) in inline {
-        upsert(&mut pairs, OsString::from(key), value.clone(), ignore_case);
-    }
-    let mut env = EnvMap {
-        pairs,
-        utf8: HashMap::new(),
-    };
-    env.rebuild_utf8();
-    env
-}
-
-pub(crate) fn load_dotenv_files(
-    paths: &[std::path::PathBuf],
-) -> Result<Vec<(String, String)>, Error> {
-    let mut out = Vec::new();
-    for path in paths {
-        let text = fs::read_to_string(path).map_err(|err| Error::io(path, &err))?;
-        out.extend(parse_dotenv(&text, path)?);
-    }
-    Ok(out)
-}
-
-pub(crate) fn parse_dotenv(text: &str, path: &Path) -> Result<Vec<(String, String)>, Error> {
-    let mut out = Vec::new();
-    for (idx, raw) in text.lines().enumerate() {
-        let line_no = idx + 1;
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
+        let Some(value) = value.to_str() else {
             continue;
-        }
-        let line = strip_export(line);
-        let Some((key, raw_value)) = line.split_once('=') else {
-            return Err(Error::at(path, line_no, "invalid dotenv line"));
         };
-        let key = key.trim();
-        if !crate::cli::is_env_name(key) {
-            return Err(Error::at(path, line_no, "invalid dotenv line"));
+        put(&mut env, &mut quotes, key, value, None);
+    }
+
+    if let Some(injector) = injector {
+        let stdout = run_injector(
+            injector.program,
+            injector.argv,
+            &serialize(&env),
+            cwd,
+            parent,
+        )?;
+        let document = neotales_dotenv::parse(&stdout);
+        if let Some((_, span)) = document.first_invalid() {
+            return Err(Error::new(
+                1,
+                format!(
+                    "injector {}:{}: invalid dotenv line",
+                    injector.program.display(),
+                    span.line
+                ),
+            ));
         }
-        let value = parse_value(raw_value.trim())
-            .map_err(|_| Error::at(path, line_no, "invalid dotenv line"))?;
-        out.push((key.to_string(), value));
-    }
-    Ok(out)
-}
-
-fn strip_export(line: &str) -> &str {
-    match line.strip_prefix("export") {
-        Some(rest) if rest.starts_with(char::is_whitespace) => rest.trim_start(),
-        _ => line,
-    }
-}
-
-fn parse_value(raw: &str) -> Result<String, ()> {
-    let mut chars = raw.chars().peekable();
-    let Some(first) = chars.peek().copied() else {
-        return Ok(String::new());
-    };
-    if first != '"' && first != '\'' {
-        return Ok(cut_unquoted_comment(raw).trim_end().to_string());
-    }
-    let quote = first;
-    chars.next();
-    let mut out = String::new();
-    let mut closed = false;
-    while let Some(c) = chars.next() {
-        if quote == '"' && c == '\\' {
-            match chars.next() {
-                Some(next) => out.push(next),
-                None => return Err(()),
-            }
-            continue;
+        env = Environment::new(Platform::host());
+        quotes.clear();
+        for assignment in document.assignments() {
+            put(
+                &mut env,
+                &mut quotes,
+                &assignment.key,
+                &assignment.value,
+                Some(assignment.quote),
+            );
         }
-        if c == quote {
-            closed = true;
-            break;
-        }
-        out.push(c);
     }
-    if !closed {
-        return Err(());
-    }
-    let rest: String = chars.collect();
-    let rest = rest.trim_start();
-    if !rest.is_empty() && !rest.starts_with('#') {
-        return Err(());
-    }
-    Ok(out)
+
+    let expanded = expand(env, &quotes);
+    Ok(EnvMap::from_environment(&expanded, non_utf8))
 }
 
-fn cut_unquoted_comment(value: &str) -> &str {
-    let bytes = value.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'#' && (i == 0 || bytes[i - 1].is_ascii_whitespace()) {
-            return &value[..i];
-        }
-        i += 1;
+fn expand(source: Environment, quotes: &HashMap<String, QuoteStyle>) -> Environment {
+    let mut out = Environment::new(Platform::host());
+    for (key, value) in source.as_map() {
+        let literal = matches!(quotes.get(key), Some(QuoteStyle::Single | QuoteStyle::Raw));
+        let next = if literal {
+            value.clone()
+        } else {
+            neotales_env::interpolate(value, &out)
+        };
+        out.insert(key, next);
     }
-    value
+    out.remove("VAELRUN_DETACHED");
+    out
 }
 
-fn keys_eq(left: &std::ffi::OsStr, right: &std::ffi::OsStr, ignore_case: bool) -> bool {
-    if ignore_case {
-        left.to_string_lossy()
-            .eq_ignore_ascii_case(&right.to_string_lossy())
-    } else {
-        left == right
-    }
-}
-
-fn upsert(
-    pairs: &mut Vec<(OsString, OsString)>,
-    key: OsString,
-    value: OsString,
-    ignore_case: bool,
+fn put(
+    env: &mut Environment,
+    quotes: &mut HashMap<String, QuoteStyle>,
+    key: &str,
+    value: &str,
+    quote: Option<QuoteStyle>,
 ) {
-    if let Some((_, slot)) = pairs
-        .iter_mut()
-        .find(|(existing, _)| keys_eq(existing, &key, ignore_case))
-    {
-        *slot = value;
-    } else {
-        pairs.push((key, value));
+    env.insert(key, value);
+    let stored = stored_key(env, key);
+    match quote {
+        Some(style) => {
+            quotes.insert(stored, style);
+        }
+        None => {
+            quotes.remove(&stored);
+        }
     }
 }
 
-fn remove_key(pairs: &mut Vec<(OsString, OsString)>, name: &str, ignore_case: bool) {
-    let needle = OsString::from(name);
-    pairs.retain(|(key, _)| !keys_eq(key, &needle, ignore_case));
+fn stored_key(env: &Environment, key: &str) -> String {
+    env.as_map()
+        .keys()
+        .find(|existing| keys_equal(existing, key))
+        .cloned()
+        .unwrap_or_else(|| key.to_string())
+}
+
+fn keys_equal(left: &str, right: &str) -> bool {
+    match Platform::host() {
+        Platform::Unix => left == right,
+        Platform::Windows => left.eq_ignore_ascii_case(right),
+    }
+}
+
+fn reject_invalid(path: &Path, document: &Document) -> Result<(), Error> {
+    if let Some((_, span)) = document.first_invalid() {
+        return Err(Error::at(
+            path,
+            usize::try_from(span.line).unwrap_or(0),
+            "invalid dotenv line",
+        ));
+    }
+    Ok(())
+}
+
+fn serialize(env: &Environment) -> String {
+    let mut out = String::new();
+    for (key, value) in env.as_map() {
+        out.push_str(key);
+        out.push('=');
+        out.push_str(&encode_value(value));
+        out.push('\n');
+    }
+    out
+}
+
+fn encode_value(value: &str) -> String {
+    let quote = value.contains([' ', '#', '\'', '"', '$', '\n'])
+        || value.starts_with(' ')
+        || value.ends_with(' ');
+    if !quote {
+        return value.to_string();
+    }
+    let mut encoded = String::from("\"");
+    for ch in value.chars() {
+        if ch == '"' || ch == '\\' {
+            encoded.push('\\');
+        }
+        encoded.push(ch);
+    }
+    encoded.push('"');
+    encoded
+}
+
+fn run_injector(
+    program: &Path,
+    argv: &[String],
+    document: &str,
+    cwd: &Path,
+    parent: &[(OsString, OsString)],
+) -> Result<String, Error> {
+    let mut cmd = Command::new(program);
+    if argv.len() > 1 {
+        cmd.args(&argv[1..]);
+    }
+    cmd.current_dir(cwd);
+    cmd.env_clear();
+    cmd.envs(parent.iter().cloned());
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::inherit());
+    let mut child = cmd.spawn().map_err(|err| Error::io(program, &err))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(document.as_bytes())
+            .map_err(|err| Error::io(program, &err))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|err| Error::io(program, &err))?;
+    if !output.status.success() {
+        let code = output.status.code().unwrap_or(1);
+        return Err(Error::new(
+            1,
+            format!("injector {}: status {code}", program.display()),
+        ));
+    }
+    String::from_utf8(output.stdout).map_err(|_| {
+        Error::new(
+            1,
+            format!("injector {}: stdout is not utf-8", program.display()),
+        )
+    })
 }
 
 #[cfg(test)]
@@ -186,16 +283,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn quotes_export_and_rejects_unknown_lines() {
-        let text = "export FOO=bar\nBAZ=\"qu x\"\n# c\n\nQUX='a b'\nKEEP=\"a $b\"\n";
-        let parsed = parse_dotenv(text, Path::new("f.env")).unwrap();
-        let map: HashMap<_, _> = parsed.into_iter().collect();
-        assert_eq!(map.get("FOO").map(String::as_str), Some("bar"));
-        assert_eq!(map.get("BAZ").map(String::as_str), Some("qu x"));
-        assert_eq!(map.get("QUX").map(String::as_str), Some("a b"));
-        assert_eq!(map.get("KEEP").map(String::as_str), Some("a $b"));
-
-        let err = parse_dotenv("nope\n", Path::new("f.env")).unwrap_err();
+    fn invalid_line_names_file_and_line_not_the_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.env");
+        fs::write(&path, "nope\n").unwrap();
+        let err = build_env(&[], &[path], &[], &[], dir.path(), None).unwrap_err();
         assert_eq!(err.code, 1);
         assert!(err.message.contains("f.env"));
         assert!(err.message.contains('1'));
@@ -203,34 +295,31 @@ mod tests {
     }
 
     #[test]
-    fn unset_sits_between_dotenv_and_inline() {
-        let parent = vec![(OsString::from("FOO"), OsString::from("parent"))];
-        let dotenv = [
-            ("FOO".to_string(), "file".to_string()),
-            ("OTHER".to_string(), "file".to_string()),
-        ];
-        let env = merge_env(
-            parent,
-            dotenv,
-            &["FOO".to_string()],
-            &[("FOO".to_string(), OsString::from("inline"))],
-            false,
-        );
-        assert_eq!(env.get("FOO"), Some("inline"));
-        assert_eq!(env.get("OTHER"), Some("file"));
+    fn expands_in_order_and_keeps_single_quotes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        fs::write(
+            &path,
+            "BAR=there\nFOO=${BAR}\nKEEP=\"a $b\"\nLIT='${BAR}'\n",
+        )
+        .unwrap();
+        let env = build_env(&[], &[path], &[], &[], dir.path(), None).unwrap();
+        assert_eq!(env.get("FOO"), Some("there"));
+        assert_eq!(env.get("KEEP"), Some("a "));
+        assert_eq!(env.get("LIT"), Some("${BAR}"));
     }
 
     #[test]
-    fn windows_env_keys_ignore_case() {
-        let parent = vec![(OsString::from("Path"), OsString::from("a"))];
-        let env = merge_env(
-            parent,
-            [("PATH".to_string(), "b".to_string())],
-            &[],
-            &[],
-            true,
-        );
-        assert_eq!(env.pairs.len(), 1);
-        assert_eq!(env.pairs[0].1, OsString::from("b"));
+    fn quoted_serializer_escapes_quotes_and_dollars() {
+        let mut env = Environment::new(Platform::Unix);
+        env.insert("PLAIN", "ok");
+        env.insert("SPACE", "a b");
+        env.insert("DOLLAR", "x$y");
+        env.insert("QUOTE", "say \"hi\"");
+        let text = serialize(&env);
+        assert!(text.contains("PLAIN=ok\n"), "{text}");
+        assert!(text.contains("SPACE=\"a b\"\n"), "{text}");
+        assert!(text.contains("DOLLAR=\"x$y\"\n"), "{text}");
+        assert!(text.contains("QUOTE=\"say \\\"hi\\\"\"\n"), "{text}");
     }
 }

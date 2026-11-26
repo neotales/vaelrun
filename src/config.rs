@@ -21,6 +21,8 @@ pub(crate) struct Config {
     pub aliases: BTreeMap<String, Vec<String>>,
     /// `None` when no file set `[trust]`.
     pub trust: Option<bool>,
+    /// `None` when this file did not set `[secrets] injector`. Empty means off.
+    pub injector: Option<Vec<String>>,
 }
 
 impl Config {
@@ -48,6 +50,14 @@ impl Config {
         if other.trust.is_some() {
             self.trust = other.trust;
         }
+        if other.injector.is_some() {
+            self.injector = other.injector;
+        }
+    }
+
+    /// Quote-aware injector argv, if one is configured and non-empty.
+    pub(crate) fn injector_argv(&self) -> Option<&[String]> {
+        self.injector.as_deref().filter(|argv| !argv.is_empty())
     }
 
     pub(crate) fn trust_on(&self) -> bool {
@@ -158,6 +168,21 @@ pub(crate) fn parse_config(text: &str, path: &Path) -> Result<Config, Error> {
                     }
                     _ => unreachable!(),
                 }
+            }
+            "secrets" => {
+                let Some((key, value)) = split_kv(line) else {
+                    return Err(Error::at(path, line_no, "expected key=value"));
+                };
+                if key != "injector" {
+                    return Err(Error::at(path, line_no, "unknown secrets key"));
+                }
+                if value.is_empty() {
+                    cfg.injector = Some(Vec::new());
+                    continue;
+                }
+                let argv = crate::template::split_quoted(value)
+                    .map_err(|_| Error::at(path, line_no, "invalid injector"))?;
+                cfg.injector = Some(argv);
             }
             _ => return Err(Error::at(path, line_no, "unknown section")),
         }
