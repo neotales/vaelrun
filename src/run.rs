@@ -29,6 +29,7 @@ struct Ctx<'a> {
 enum Mode {
     Implicit,
     Run,
+    Start,
 }
 
 pub(crate) fn run(opts: RunOptions) -> Result<i32, Error> {
@@ -56,7 +57,7 @@ pub(crate) fn run(opts: RunOptions) -> Result<i32, Error> {
 
     let home = env_path("HOME");
     let profile = env_path("USERPROFILE");
-    let extra = env_path("VAELRUN_CONFIG");
+    let extra = opts.config.clone().or_else(|| env_path("VAELRUN_CONFIG"));
     let paths = config::config_file_paths(
         host(),
         home.as_deref(),
@@ -120,7 +121,7 @@ fn subcommand(inv: &Invocation, bin_dirs: &[PathBuf], ctx: &Ctx<'_>) -> Result<O
             if inv.command.len() != 2 {
                 return Err(Error::usage("open needs a target"));
             }
-            Ok(Some(open_target(&inv.command[1], inv.detach, ctx)?))
+            Ok(Some(open_target(&inv.command[1], inv.detach, ctx, false)?))
         }
         Some("start") => {
             if inv.command.len() < 2 {
@@ -129,7 +130,7 @@ fn subcommand(inv: &Invocation, bin_dirs: &[PathBuf], ctx: &Ctx<'_>) -> Result<O
             Ok(Some(dispatch(
                 &inv.command[1],
                 &inv.command[2..],
-                Mode::Implicit,
+                Mode::Start,
                 true,
                 ctx,
             )?))
@@ -168,39 +169,61 @@ fn dispatch(
     detach: bool,
     ctx: &Ctx<'_>,
 ) -> Result<i32, Error> {
+    dispatch_inner(token, args, mode, detach, ctx, true)
+}
+
+fn dispatch_inner(
+    token: &OsStr,
+    args: &[OsString],
+    mode: Mode,
+    detach: bool,
+    ctx: &Ctx<'_>,
+    follow_alias: bool,
+) -> Result<i32, Error> {
+    if cli::is_url(token) && !ctx.config.urls_enabled() {
+        return Err(Error::new(1, "URL opening is disabled"));
+    }
+
     let path = cli::resolve_path(ctx.cwd, token);
     let unqualified = cli::is_unqualified(token);
     let suffix = cli::extension_suffix(token);
-    let implicit = matches!(mode, Mode::Implicit);
+    let implicit = !matches!(mode, Mode::Run);
 
     if implicit && path.is_dir() {
-        return open_target(path.as_os_str(), detach, ctx);
+        return open_target(
+            path.as_os_str(),
+            detach,
+            ctx,
+            starting_app(token, ctx, mode),
+        );
     }
     if implicit && cli::is_url(token) {
-        return open_target(token, detach, ctx);
+        return open_target(token, detach, ctx, false);
     }
 
-    if let Some(suffix) = suffix.as_deref()
-        && (suffix == ".vrun" || is_mapped(suffix, ctx))
-    {
-        if path.is_file() {
-            return if suffix == ".vrun" {
-                run_script(&path, detach, ctx)
-            } else {
-                run_extension(suffix, &path, args, detach, token, ctx)
-            };
+    if let Some(suffix) = suffix.as_deref() {
+        if suffix == ".vrun" || is_mapped(suffix, ctx) {
+            if path.is_file() {
+                return dispatch_file(&path, Some(suffix), args, mode, detach, token, ctx);
+            }
+            if unqualified
+                && follow_alias
+                && let Some(code) = try_alias(token, args, mode, detach, ctx)?
+            {
+                return Ok(code);
+            }
+            return Err(Error::not_found(&token.to_string_lossy()));
         }
-        if unqualified && let Some(code) = try_alias(token, args, detach, ctx)? {
-            return Ok(code);
+        if is_script_suffix(suffix, ctx) && path.is_file() {
+            return dispatch_file(&path, Some(suffix), args, mode, detach, token, ctx);
         }
-        return Err(Error::not_found(&token.to_string_lossy()));
     }
 
     if path.is_file() && !unqualified {
-        return run_existing(&path, args, mode, detach, token, ctx);
+        return dispatch_file(&path, suffix.as_deref(), args, mode, detach, token, ctx);
     }
-    if unqualified {
-        if let Some(code) = try_alias(token, args, detach, ctx)? {
+    if unqualified && follow_alias {
+        if let Some(code) = try_alias(token, args, mode, detach, ctx)? {
             return Ok(code);
         }
         if let Some(hit) = ctx.finder.lookup(&token.to_string_lossy()) {
@@ -210,12 +233,12 @@ fn dispatch(
             return run_program(&hit.into_path(), args, detach, token, ctx);
         }
         if implicit && suffix.is_some() {
-            return open_target(token, detach, ctx);
+            return open_target(token, detach, ctx, false);
         }
         return Err(Error::not_found(&token.to_string_lossy()));
     }
     if implicit {
-        return open_target(token, detach, ctx);
+        return open_target(token, detach, ctx, false);
     }
     if path.exists() {
         Err(Error::cannot_execute(&path.display().to_string()))
@@ -224,24 +247,48 @@ fn dispatch(
     }
 }
 
-fn run_existing(
+/// Shebang wins over an extension executor. A file that is neither is opened,
+/// unless `run` was asked to execute it.
+fn dispatch_file(
     path: &Path,
+    suffix: Option<&str>,
     args: &[OsString],
     mode: Mode,
     detach: bool,
     original: &OsStr,
     ctx: &Ctx<'_>,
 ) -> Result<i32, Error> {
-    if let Some(shebang) = shebang::read_shebang(path)? {
-        return run_shebang(&shebang, path, args, detach, original, ctx);
+    if suffix == Some(".vrun") {
+        return run_script(path, detach, ctx);
     }
-    if resolve::is_executable(path) {
+    let probed = if may_sniff(suffix, ctx) {
+        Some(shebang::probe(path)?)
+    } else {
+        None
+    };
+    if let Some(shebang) = probed.as_ref().and_then(|item| item.shebang.as_ref()) {
+        return run_shebang(shebang, path, args, detach, original, ctx);
+    }
+    if let Some(suffix) = suffix
+        && is_mapped(suffix, ctx)
+    {
+        return run_extension(suffix, path, args, detach, original, ctx);
+    }
+    if suffix.is_none()
+        && probed.as_ref().is_some_and(|item| item.binary)
+        && resolve::is_executable(path)
+    {
         return exec_path(path, args, detach, original, ctx);
     }
     if matches!(mode, Mode::Run) {
         return Err(Error::cannot_execute(&path.display().to_string()));
     }
-    open_target(path.as_os_str(), detach, ctx)
+    open_target(
+        path.as_os_str(),
+        detach,
+        ctx,
+        starting_app(original, ctx, mode),
+    )
 }
 
 fn run_program(
@@ -251,29 +298,57 @@ fn run_program(
     original: &OsStr,
     ctx: &Ctx<'_>,
 ) -> Result<i32, Error> {
-    if let Some(shebang) = shebang::read_shebang(path)? {
+    let suffix = cli::extension_suffix(path.as_os_str());
+    if may_sniff(suffix.as_deref(), ctx)
+        && let Some(shebang) = shebang::probe(path)?.shebang
+    {
         return run_shebang(&shebang, path, args, detach, original, ctx);
     }
     exec_path(path, args, detach, original, ctx)
 }
 
+/// Alias targets use the same file rules as a typed path. They are not expanded again.
 fn try_alias(
     token: &OsStr,
     args: &[OsString],
+    mode: Mode,
     detach: bool,
     ctx: &Ctx<'_>,
 ) -> Result<Option<i32>, Error> {
     let Some(name) = token.to_str() else {
         return Ok(None);
     };
-    let Some(alias) = ctx.config.aliases.get(name) else {
+    let Some(alias) = ctx.config.aliases.get(name).cloned() else {
         return Ok(None);
     };
-    let mut argv: Vec<OsString> = alias.iter().map(OsString::from).collect();
-    argv.extend(args.iter().cloned());
-    let program = resolve::resolve_program(&argv[0], ctx.finder, ctx.cwd, ctx.trust_on)?;
-    argv[0] = program.into();
-    Ok(Some(finish(argv, detach, token, ctx)?))
+    if alias.is_empty() {
+        return Ok(None);
+    }
+    let target = OsString::from(&alias[0]);
+    let mut forwarded: Vec<OsString> = alias[1..].iter().map(OsString::from).collect();
+    forwarded.extend(args.iter().cloned());
+    Ok(Some(dispatch_inner(
+        &target, &forwarded, mode, detach, ctx, false,
+    )?))
+}
+
+fn may_sniff(suffix: Option<&str>, ctx: &Ctx<'_>) -> bool {
+    match suffix {
+        None => true,
+        Some(suffix) => {
+            is_builtin(suffix)
+                || ctx.config.extensions.contains_key(suffix)
+                || is_script_suffix(suffix, ctx)
+        }
+    }
+}
+
+fn is_script_suffix(suffix: &str, ctx: &Ctx<'_>) -> bool {
+    ctx.config.scripts.iter().any(|have| have == suffix)
+}
+
+fn starting_app(token: &OsStr, ctx: &Ctx<'_>, mode: Mode) -> bool {
+    matches!(mode, Mode::Start) && resolve_app(token, ctx).is_some()
 }
 
 fn exec_path(
@@ -492,12 +567,15 @@ fn shell_script(path: &str, args: &[&str]) -> neotales_exec::Command {
     }
 }
 
+const PS_FLAGS: [&str; 1] = ["-NoLogo"];
+
 fn powershell_script(path: &str, args: &[&str]) -> neotales_exec::Command {
-    let pwsh = neotales_exec_script::pwsh::file(path, args.iter().copied());
+    let pwsh =
+        neotales_exec_script::pwsh::file_with_shell_args(path, PS_FLAGS, args.iter().copied());
     if runtime_resolved(&pwsh, "pwsh") || neotales_exec::find("pwsh", None).is_ok() {
         pwsh
     } else {
-        neotales_exec_script::powershell::file(path, args.iter().copied())
+        neotales_exec_script::powershell::file_with_shell_args(path, PS_FLAGS, args.iter().copied())
     }
 }
 
@@ -577,11 +655,15 @@ fn runtime_shebang(
         "zsh" => {
             zsh::file_with_shell_args(script, shell_args.iter().copied(), extras.iter().copied())
         }
-        "pwsh" if shell_args.is_empty() => pwsh::file(script, extras.iter().copied()),
+        "pwsh" if shell_args.is_empty() => {
+            pwsh::file_with_shell_args(script, PS_FLAGS, extras.iter().copied())
+        }
         "pwsh" => {
             pwsh::file_with_shell_args(script, shell_args.iter().copied(), extras.iter().copied())
         }
-        "powershell" if shell_args.is_empty() => powershell::file(script, extras.iter().copied()),
+        "powershell" if shell_args.is_empty() => {
+            powershell::file_with_shell_args(script, PS_FLAGS, extras.iter().copied())
+        }
         "powershell" => powershell::file_with_shell_args(
             script,
             shell_args.iter().copied(),
@@ -725,32 +807,146 @@ fn edit(path: &Path, ctx: &Ctx<'_>) -> Result<i32, Error> {
     )
 }
 
-fn open_target(target: &OsStr, detach: bool, ctx: &Ctx<'_>) -> Result<i32, Error> {
+fn open_target(
+    target: &OsStr,
+    detach: bool,
+    ctx: &Ctx<'_>,
+    new_instance: bool,
+) -> Result<i32, Error> {
+    if cli::is_url(target) && !ctx.config.urls_enabled() {
+        return Err(Error::new(1, "URL opening is disabled"));
+    }
     if let Some(opener) = ctx.opener {
         return spawn(&[opener.to_os_string(), target.to_os_string()], ctx, detach);
     }
-    // Linux: xdg-open. macOS: open. Windows directories: explorer.exe.
-    // Documents and URLs on Windows use ShellExecuteW. `cmd /c start` is not
-    // used because it splits URLs on `&`.
-    #[cfg(windows)]
-    {
-        if Path::new(target).is_dir() {
-            let explorer = resolve::resolve_lenient("explorer", ctx.finder, ctx.cwd)?;
-            return spawn(&[explorer.into(), target.to_os_string()], ctx, detach);
+    let facts = OpenerFacts {
+        host: host(),
+        wsl: wsl_detected(),
+        wsl_xdg_open: ctx.config.wsl_xdg_open_on(),
+        wslview_found: ctx.finder.lookup("wslview").is_some(),
+        directory: Path::new(target).is_dir(),
+        new_instance,
+    };
+    // Linux: xdg-open. macOS: open. Windows documents and URLs: ShellExecuteW.
+    // `cmd /c start` splits on `&` and treats the first quoted string as a title.
+    match choose_opener(&facts) {
+        OpenerChoice::ShellExecute => {
+            #[cfg(windows)]
+            {
+                shell_execute(target)?;
+                return Ok(0);
+            }
+            #[cfg(not(windows))]
+            Err(Error::new(1, "ShellExecuteW is only available on Windows"))
         }
-        shell_execute(target)?;
-        return Ok(0);
+        OpenerChoice::OpenNew => {
+            let open = resolve::resolve_lenient("open", ctx.finder, ctx.cwd)?;
+            let bundle = resolve_app(target, ctx).unwrap_or_else(|| PathBuf::from(target));
+            // `open -n` returns immediately. Do not setsid the bundle.
+            spawn(
+                &[
+                    open.into(),
+                    OsString::from("-n"),
+                    bundle.as_os_str().to_os_string(),
+                ],
+                ctx,
+                false,
+            )
+        }
+        OpenerChoice::XdgOpen => spawn_opener("xdg-open", target, detach, ctx),
+        OpenerChoice::Open => spawn_opener("open", target, detach, ctx),
+        OpenerChoice::WslView => spawn_opener("wslview", target, detach, ctx),
+        OpenerChoice::Explorer => spawn_opener("explorer.exe", target, detach, ctx),
     }
-    #[cfg(not(windows))]
-    {
-        let bin = if cfg!(target_os = "macos") {
-            "open"
+}
+
+fn spawn_opener(name: &str, target: &OsStr, detach: bool, ctx: &Ctx<'_>) -> Result<i32, Error> {
+    let program = resolve::resolve_lenient(name, ctx.finder, ctx.cwd)?;
+    spawn(&[program.into(), target.to_os_string()], ctx, detach)
+}
+
+/// Which platform tool opens a document, directory, or URL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OpenerChoice {
+    XdgOpen,
+    Open,
+    OpenNew,
+    WslView,
+    Explorer,
+    ShellExecute,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct OpenerFacts {
+    host: HostOs,
+    wsl: bool,
+    wsl_xdg_open: bool,
+    wslview_found: bool,
+    directory: bool,
+    new_instance: bool,
+}
+
+/// Pick the opener from host, WSL, and `[open] wsl-xdg-open`. Outside WSL the key is ignored.
+fn choose_opener(facts: &OpenerFacts) -> OpenerChoice {
+    if facts.host == HostOs::Macos && facts.new_instance {
+        return OpenerChoice::OpenNew;
+    }
+    if facts.wsl {
+        if facts.wsl_xdg_open {
+            return OpenerChoice::XdgOpen;
+        }
+        return if facts.wslview_found {
+            OpenerChoice::WslView
         } else {
-            "xdg-open"
+            OpenerChoice::Explorer
         };
-        let opener = resolve::resolve_lenient(bin, ctx.finder, ctx.cwd)?;
-        spawn(&[opener.into(), target.to_os_string()], ctx, detach)
     }
+    match facts.host {
+        HostOs::Windows if facts.directory => OpenerChoice::Explorer,
+        HostOs::Windows => OpenerChoice::ShellExecute,
+        HostOs::Macos => OpenerChoice::Open,
+        HostOs::Linux => OpenerChoice::XdgOpen,
+    }
+}
+
+fn wsl_detected() -> bool {
+    std::env::var_os("WSL_DISTRO_NAME").is_some_and(|value| !value.is_empty())
+        || Path::new("/proc/sys/fs/binfmt_misc/WSLInterop").exists()
+}
+
+fn resolve_app(target: &OsStr, ctx: &Ctx<'_>) -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let path = cli::resolve_path(ctx.cwd, target);
+    if is_app_dir(&path) {
+        return Some(path);
+    }
+    if !cli::is_unqualified(target) {
+        return None;
+    }
+    let name = target.to_str()?;
+    let stem = name.strip_suffix(".app").unwrap_or(name);
+    let mut candidates = vec![
+        ctx.cwd.join(format!("{stem}.app")),
+        PathBuf::from("/Applications").join(format!("{stem}.app")),
+    ];
+    if let Some(home) = ctx.env.get("HOME") {
+        candidates.push(
+            PathBuf::from(home)
+                .join("Applications")
+                .join(format!("{stem}.app")),
+        );
+    }
+    candidates.into_iter().find(|path| is_app_dir(path))
+}
+
+fn is_app_dir(path: &Path) -> bool {
+    path.is_dir()
+        && path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("app"))
 }
 
 fn run_script(path: &Path, detach: bool, ctx: &Ctx<'_>) -> Result<i32, Error> {
@@ -1214,7 +1410,7 @@ mod tests {
     use std::ffi::OsStr;
     use std::path::Path;
 
-    use super::{is_builtin, script_builder};
+    use super::{HostOs, OpenerChoice, OpenerFacts, choose_opener, is_builtin, script_builder};
     use crate::cli::extension_suffix;
 
     #[test]
@@ -1229,6 +1425,20 @@ mod tests {
             extension_suffix(OsStr::new("plot.R")).as_deref(),
             Some(".r")
         );
+        let ps1 = script_builder(".ps1", "app.ps1", &["-c", "Release"]).unwrap();
+        let flags: Vec<String> = ps1
+            .arguments()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(flags.iter().any(|arg| arg == "-NoLogo"), "{flags:?}");
+        assert!(flags.iter().any(|arg| arg == "-File"), "{flags:?}");
+        assert!(
+            flags.iter().all(|arg| !arg.contains("ExecutionPolicy")),
+            "{flags:?}"
+        );
+        assert!(!flags.iter().any(|arg| arg == "-NoProfile"), "{flags:?}");
+
         let cmd = script_builder(".nu", "app.nu", &[]).unwrap();
         let program = cmd.program().to_string_lossy();
         let name = Path::new(program.as_ref())
@@ -1236,5 +1446,31 @@ mod tests {
             .unwrap()
             .to_string_lossy();
         assert!(name == "nu" || name == "nu.exe", "{program}");
+    }
+
+    #[test]
+    fn wsl_opener_follows_the_config_flag() {
+        let mut facts = OpenerFacts {
+            host: HostOs::Linux,
+            wsl: true,
+            wsl_xdg_open: true,
+            wslview_found: true,
+            directory: false,
+            new_instance: false,
+        };
+        assert_eq!(choose_opener(&facts), OpenerChoice::XdgOpen);
+        facts.wsl_xdg_open = false;
+        assert_eq!(choose_opener(&facts), OpenerChoice::WslView);
+        facts.wslview_found = false;
+        assert_eq!(choose_opener(&facts), OpenerChoice::Explorer);
+        facts.wsl = false;
+        facts.wsl_xdg_open = true;
+        assert_eq!(choose_opener(&facts), OpenerChoice::XdgOpen);
+        facts.host = HostOs::Macos;
+        assert_eq!(choose_opener(&facts), OpenerChoice::Open);
+        facts.host = HostOs::Windows;
+        assert_eq!(choose_opener(&facts), OpenerChoice::ShellExecute);
+        facts.directory = true;
+        assert_eq!(choose_opener(&facts), OpenerChoice::Explorer);
     }
 }

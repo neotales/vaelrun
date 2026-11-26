@@ -11,18 +11,24 @@ pub(crate) enum HostOs {
     Windows,
 }
 
-/// Loaded INI. `[bin]` and `[detach]` append; the other sections replace by key.
+/// Loaded INI. `[bin]`, `[detach]`, and `[scripts]` append; the other sections replace by key.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Config {
     pub bin_dirs: Vec<String>,
     pub detach: Vec<String>,
     /// Lowercased suffix including the dot, mapped to the raw template.
     pub extensions: BTreeMap<String, String>,
+    /// Suffixes vrun may sniff for a shebang. They are not executors.
+    pub scripts: Vec<String>,
     pub aliases: BTreeMap<String, Vec<String>>,
     /// `None` when no file set `[trust]`.
     pub trust: Option<bool>,
     /// `None` when this file did not set `[secrets] injector`. Empty means off.
     pub injector: Option<Vec<String>>,
+    /// `None` when no file set `[open] urls`. Default is on.
+    pub open_urls: Option<bool>,
+    /// `None` when no file set `[open] wsl-xdg-open`. Default is off.
+    pub wsl_xdg_open: Option<bool>,
 }
 
 impl Config {
@@ -53,6 +59,27 @@ impl Config {
         if other.injector.is_some() {
             self.injector = other.injector;
         }
+        for suffix in other.scripts {
+            if !self.scripts.iter().any(|have| have == &suffix) {
+                self.scripts.push(suffix);
+            }
+        }
+        if other.open_urls.is_some() {
+            self.open_urls = other.open_urls;
+        }
+        if other.wsl_xdg_open.is_some() {
+            self.wsl_xdg_open = other.wsl_xdg_open;
+        }
+    }
+
+    /// `true` unless `[open] urls` is `off`.
+    pub(crate) fn urls_enabled(&self) -> bool {
+        self.open_urls.unwrap_or(true)
+    }
+
+    /// `true` only when `[open] wsl-xdg-open` is `on`.
+    pub(crate) fn wsl_xdg_open_on(&self) -> bool {
+        self.wsl_xdg_open.unwrap_or(false)
     }
 
     /// Quote-aware injector argv, if one is configured and non-empty.
@@ -125,14 +152,31 @@ pub(crate) fn parse_config(text: &str, path: &Path) -> Result<Config, Error> {
         }
         match section.as_str() {
             "" => return Err(Error::at(path, line_no, "key outside section")),
-            "bin" | "detach" => {
+            "bin" | "detach" | "scripts" => {
                 if line.contains('=') {
                     return Err(Error::at(path, line_no, "expected a bare value"));
                 }
-                if section == "bin" {
-                    cfg.bin_dirs.push(line.to_string());
-                } else {
-                    cfg.detach.push(line.to_string());
+                match section.as_str() {
+                    "bin" => cfg.bin_dirs.push(line.to_string()),
+                    "detach" => cfg.detach.push(line.to_string()),
+                    _ => cfg.scripts.push(normalize_suffix(line)),
+                }
+            }
+            "open" => {
+                let Some((key, value)) = split_kv(line) else {
+                    return Err(Error::at(path, line_no, "expected key=value"));
+                };
+                if key.is_empty() {
+                    return Err(Error::at(path, line_no, "expected key=value"));
+                }
+                let enabled = parse_trust_mode(value)
+                    .ok_or_else(|| Error::at(path, line_no, &format!("invalid value for {key}")))?;
+                match key {
+                    "urls" => cfg.open_urls = Some(enabled),
+                    "wsl-xdg-open" => cfg.wsl_xdg_open = Some(enabled),
+                    _ => {
+                        return Err(Error::at(path, line_no, &format!("unknown open key {key}")));
+                    }
                 }
             }
             "extensions" | "alias" | "trust" => {
@@ -337,5 +381,35 @@ mod tests {
         );
         assert_eq!(cfg.trust, Some(false));
         assert!(cfg.aliases.contains_key("cmd"));
+    }
+
+    #[test]
+    fn scripts_append_and_open_keys_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("a.ini");
+        let second = dir.path().join("b.ini");
+        fs::write(
+            &first,
+            "[scripts]\n.txt\n.custom\n[open]\nurls = on\nwsl-xdg-open = off\n",
+        )
+        .unwrap();
+        fs::write(
+            &second,
+            "[scripts]\n.txt\n.R\n[open]\nurls = off\nwsl-xdg-open = on\n",
+        )
+        .unwrap();
+        let cfg = load_config(&[first, second]).unwrap();
+        assert_eq!(
+            cfg.scripts,
+            vec![".txt".to_string(), ".custom".to_string(), ".r".to_string()]
+        );
+        assert_eq!(cfg.open_urls, Some(false));
+        assert_eq!(cfg.wsl_xdg_open, Some(true));
+
+        let bad = dir.path().join("bad.ini");
+        let err = parse_config("[open]\nurls = maybe\n", &bad).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains(&bad.display().to_string()), "{message}");
+        assert!(message.contains("urls"), "{message}");
     }
 }

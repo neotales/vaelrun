@@ -19,6 +19,7 @@ mod template;
 pub use error::Error;
 
 use std::ffi::OsString;
+use std::path::PathBuf;
 
 /// Inputs for [`run_with`]. The process environment is used when a field is unset.
 #[derive(Debug, Default)]
@@ -29,6 +30,8 @@ pub struct RunOptions {
     pub opener: Option<OsString>,
     /// Arguments including argv0. `None` reads the process arguments.
     pub args: Option<Vec<OsString>>,
+    /// Config file loaded last, in place of `$VAELRUN_CONFIG`.
+    pub config: Option<PathBuf>,
 }
 
 /// Run vrun with the process arguments.

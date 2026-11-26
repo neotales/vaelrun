@@ -19,18 +19,42 @@ pub(crate) enum Interp {
     Missing(String),
 }
 
-pub(crate) fn read_shebang(path: &Path) -> Result<Option<Shebang>, Error> {
+const SAMPLE: usize = 512;
+
+/// The first 512 bytes of a file, enough to tell a script from a binary.
+#[derive(Debug)]
+pub(crate) struct Probe {
+    pub binary: bool,
+    pub shebang: Option<Shebang>,
+}
+
+/// Read at most 512 bytes. A NUL byte means binary. A shebang is `#!` at the
+/// start of a sample that is not binary. The rest of the file is not read.
+pub(crate) fn probe(path: &Path) -> Result<Probe, Error> {
     let mut file = File::open(path).map_err(|err| Error::io(path, &err))?;
-    let mut buf = [0u8; 1024];
+    let mut buf = [0u8; SAMPLE];
     let n = file.read(&mut buf).map_err(|err| Error::io(path, &err))?;
-    if n < 2 || &buf[..2] != b"#!" {
-        return Ok(None);
+    let sample = &buf[..n];
+    if sample.contains(&0) {
+        return Ok(Probe {
+            binary: true,
+            shebang: None,
+        });
     }
-    let text = String::from_utf8_lossy(&buf[..n]);
-    let line = text.lines().next().unwrap_or("");
-    parse_shebang_line(line)
-        .map(Some)
-        .map_err(|_| Error::at(path, 1, "invalid shebang"))
+    if n >= 2 && sample.starts_with(b"#!") {
+        let text = String::from_utf8_lossy(sample);
+        let line = text.lines().next().unwrap_or("");
+        let shebang =
+            parse_shebang_line(line).map_err(|_| Error::at(path, 1, "invalid shebang"))?;
+        return Ok(Probe {
+            binary: false,
+            shebang: Some(shebang),
+        });
+    }
+    Ok(Probe {
+        binary: false,
+        shebang: None,
+    })
 }
 
 /// Accept `#!interpreter`, `#!/usr/bin/env interpreter`, and `#!/usr/bin/env -S interpreter arg...`.
