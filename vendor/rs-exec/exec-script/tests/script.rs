@@ -1,9 +1,11 @@
 //! The argument vectors each runtime builds.
 
 use neotales_exec::{Command, which};
+#[cfg(unix)]
+use neotales_exec_script::python;
 use neotales_exec_script::{
     awk, bash, bun, cmd, dart, deno, dotnet, elixir, fish, golang, groovy, julia, lua, node,
-    nushell, perl, php, powershell, pwsh, python, r, racket, ruby, sh, tcl, uv, zsh,
+    nushell, perl, php, powershell, pwsh, r, racket, ruby, sh, tcl, uv, zsh,
 };
 
 fn args(command: &Command) -> Vec<String> {
