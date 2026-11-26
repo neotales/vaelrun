@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = [".", "e2e/env-replace"]
+members = [".", "vaelrun-cli", "e2e/env-replace"]
 
 [package]
 name = "vaelrun"
@@ -12,10 +12,6 @@ authors = ["Neotales"]
 description = "cross-platform run, open, and start"
 readme = "README.md"
 publish = false
-
-[[bin]]
-name = "vrun"
-path = "src/main.rs"
 
 [dependencies]
 neotales-dotenv = "=0.0.0-alpha.1"

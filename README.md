@@ -24,7 +24,7 @@ dotnet build && dotnet test
 
 ## Install
 
-Build with `cargo build --release`. The binary is `vrun`.
+`cargo build --release -p vaelrun-cli` produces `vrun`. The package is `vaelrun-cli` because `vrun` is taken on crates.io.
 
 Path hints and script operators are implemented in this crate. It does not vendor Neotales.Exec or neotales-process.
 

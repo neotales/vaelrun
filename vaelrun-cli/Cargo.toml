@@ -1,0 +1,20 @@
+[package]
+name = "vaelrun-cli"
+version = "0.0.0-alpha.1"
+edition = "2024"
+rust-version = "1.100"
+license = "MIT"
+authors = ["Neotales"]
+description = "vrun, the vaelrun command"
+publish = false
+
+[[bin]]
+name = "vrun"
+path = "src/main.rs"
+
+[dependencies]
+vaelrun = { path = ".." }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+vaelrun = { path = ".." }
