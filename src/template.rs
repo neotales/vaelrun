@@ -35,13 +35,15 @@ pub(crate) fn split_quoted(input: &str) -> Result<Vec<String>, ()> {
             }
             if q == '"' && c == '\\' {
                 match chars.next() {
+                    Some(next @ ('\\' | '"' | '\'')) => cur.push(next),
                     Some(next) => {
+                        cur.push('\\');
                         cur.push(next);
-                        in_token = true;
-                        continue;
                     }
                     None => return Err(()),
                 }
+                in_token = true;
+                continue;
             }
             cur.push(c);
             in_token = true;
@@ -91,6 +93,19 @@ mod tests {
                 OsString::from("echo"),
                 OsString::from("hello world"),
                 OsString::from("file.ts"),
+            ]
+        );
+    }
+
+    #[test]
+    fn quoted_windows_injector_keeps_backslashes() {
+        let tokens = split_quoted(r#""C:\\Tools\\env-replace.exe" secret:db resolved"#).unwrap();
+        assert_eq!(
+            tokens,
+            vec![
+                "C:\\Tools\\env-replace.exe".to_string(),
+                "secret:db".to_string(),
+                "resolved".to_string(),
             ]
         );
     }
