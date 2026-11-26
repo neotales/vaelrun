@@ -858,8 +858,7 @@ fn open_target(
         OpenerChoice::ShellExecute => {
             #[cfg(windows)]
             {
-                shell_execute(target)?;
-                return Ok(0);
+                shell_execute(target).map(|()| 0)
             }
             #[cfg(not(windows))]
             Err(Error::new(1, "ShellExecuteW is only available on Windows"))

@@ -206,16 +206,13 @@ pub(crate) fn pathext_candidates(name: &str, pathext: Option<&str>) -> Vec<Strin
 }
 
 fn is_runnable(path: &Path) -> bool {
-    if !path.is_file() {
-        return false;
-    }
     #[cfg(unix)]
     {
-        is_executable(path)
+        path.is_file() && is_executable(path)
     }
     #[cfg(not(unix))]
     {
-        true
+        path.is_file()
     }
 }
 
