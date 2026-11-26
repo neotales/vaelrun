@@ -2,6 +2,8 @@
 
 vrun runs a command, opens a path or URL, or detaches a process. `NAME=value` prefixes, dotenv files, and `#!` scripts work the same way on Linux, macOS, and Windows.
 
+The library crate is `vaelrun/` and the CLI package is `vaelrun-cli`.
+
 Documentation is at https://vaelrun.dev.
 
 ```sh

@@ -13,8 +13,8 @@ name = "vrun"
 path = "src/main.rs"
 
 [dependencies]
-vaelrun = { path = ".." }
+vaelrun = { path = "../vaelrun" }
 
 [dev-dependencies]
 tempfile = "3.27.0"
-vaelrun = { path = ".." }
+vaelrun = { path = "../vaelrun" }

@@ -19,7 +19,7 @@ path = "src/bin/show-env.rs"
 neotales-dotenv = "=0.0.0-alpha.1"
 
 [dev-dependencies]
-vaelrun = { path = "../.." }
+vaelrun = { path = "../../vaelrun" }
 tempfile = "3.27.0"
 
 [features]
