@@ -2,6 +2,7 @@
 //!
 //! `FIXTURE_LOG` writes the arguments, one per line, and exits 0.
 //! `exit <code>` exits with that code. `env <KEY>` prints the variable.
+//! `cwd` prints the working directory.
 
 use std::env;
 use std::fs;
@@ -28,6 +29,16 @@ fn main() -> ExitCode {
             print!("{}", env::var(key).unwrap_or_default());
             ExitCode::from(0)
         }
+        Some("cwd") => match env::current_dir() {
+            Ok(dir) => {
+                print!("{}", dir.display());
+                ExitCode::from(0)
+            }
+            Err(err) => {
+                eprintln!("fixture: {err}");
+                ExitCode::from(1)
+            }
+        },
         _ => ExitCode::from(2),
     }
 }
