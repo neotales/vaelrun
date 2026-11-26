@@ -193,11 +193,16 @@ fn trust_off_allows_a_path_name_and_trust_flag_refuses() {
     let bin = dir.path().join("bin");
     fs::create_dir(&bin).unwrap();
     let name = "vaelrun-trust-child";
-    copy_fixture(&bin, name);
+    // Windows resolves a bare name through PATHEXT. The argument stays unsuffixed.
+    #[cfg(windows)]
+    let on_disk = "vaelrun-trust-child.exe";
+    #[cfg(not(windows))]
+    let on_disk = name;
+    copy_fixture(&bin, on_disk);
     let cfg = dir.path().join("config.ini");
     fs::write(&cfg, "[trust]\nmode = off\n").unwrap();
     let log = dir.path().join("ran");
-    let path = std::env::join_paths([&bin]).unwrap();
+    let path = prepend_path(&bin);
 
     let allowed = Command::new(vrun())
         .arg(name)
@@ -232,6 +237,14 @@ fn trust_off_allows_a_path_name_and_trust_flag_refuses() {
     let err = String::from_utf8(refused.stderr).unwrap();
     assert!(err.to_ascii_lowercase().contains("trust"), "{err}");
     assert!(!log.exists(), "child ran despite --trust");
+}
+
+fn prepend_path(dir: &Path) -> std::ffi::OsString {
+    let mut dirs = vec![dir.to_path_buf()];
+    if let Some(existing) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&existing));
+    }
+    std::env::join_paths(dirs).unwrap()
 }
 
 #[test]

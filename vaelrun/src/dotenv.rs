@@ -19,7 +19,15 @@ pub(crate) struct EnvMap {
 
 impl EnvMap {
     pub(crate) fn get(&self, key: &str) -> Option<&str> {
-        self.utf8.get(key).map(String::as_str)
+        if let Some(value) = self.utf8.get(key) {
+            return Some(value.as_str());
+        }
+        // Windows keeps the inherited spelling, usually `Path`, and compares
+        // names without regard to ASCII case. An exact miss is still a miss on Unix.
+        self.utf8
+            .iter()
+            .find(|(existing, _)| keys_equal(existing, key))
+            .map(|(_, value)| value.as_str())
     }
 
     fn from_document(document: &Document, non_utf8: Vec<(OsString, OsString)>) -> Self {

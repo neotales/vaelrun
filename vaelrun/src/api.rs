@@ -58,7 +58,7 @@ pub struct Environment {
 }
 
 impl Environment {
-    /// The value of `key`, if it is UTF-8.
+    /// The value of `key`, if it is UTF-8. On Windows the name match ignores ASCII case.
     #[must_use]
     pub fn get(&self, key: &str) -> Option<&str> {
         self.inner.get(key)
