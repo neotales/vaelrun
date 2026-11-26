@@ -33,6 +33,8 @@ fn bash_inline_puts_script_after_dash_c() {
     );
 }
 
+// The assertion assumes a Unix program name.
+#[cfg(unix)]
 #[test]
 fn bash_script_treats_one_sh_line_as_a_file() {
     let command = bash::script("  script.sh  ", ["one"]);
@@ -226,6 +228,8 @@ fn deno_file_allows_everything_and_deno_inline_evals() {
     assert_eq!(args(&deno::script("app.ts", [])), ["run", "-A", "app.ts"]);
 }
 
+// The assertion assumes a Unix program name.
+#[cfg(unix)]
 #[test]
 fn python_passes_arguments_after_dash_c() {
     assert_eq!(
@@ -428,6 +432,8 @@ fn bash_inline_with_shell_args_drops_the_default_prefix() {
     assert!(!arguments.iter().any(|argument| argument == "--noprofile"));
 }
 
+// The assertion assumes a Unix program name.
+#[cfg(unix)]
 #[test]
 fn bash_file_with_shell_args_appends_the_path_and_arguments() {
     let command = bash::file_with_shell_args("a.sh", [], ["x"]);
