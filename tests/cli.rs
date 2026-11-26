@@ -1,0 +1,231 @@
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
+use std::process::Command;
+
+fn vrun() -> &'static str {
+    env!("CARGO_BIN_EXE_vrun")
+}
+
+fn write_exe(path: &Path, body: &str) {
+    fs::write(path, body).unwrap();
+    let mut perms = fs::metadata(path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(path, perms).unwrap();
+}
+
+#[test]
+fn complete_bash_mentions_vrun() {
+    let out = Command::new(vrun())
+        .args(["complete", "bash"])
+        .env_remove("VAELRUN_CONFIG")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("vrun"), "{text}");
+}
+
+#[test]
+fn unknown_shell_is_usage() {
+    let out = Command::new(vrun())
+        .args(["complete", "powershell"])
+        .env_remove("VAELRUN_CONFIG")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn child_exit_code_is_propagated() {
+    let out = Command::new(vrun())
+        .args(["/bin/sh", "-c", "exit 42"])
+        .env_remove("VAELRUN_CONFIG")
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(42),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn trust_refuses_path_only_and_allows_absolute() {
+    let refused = Command::new(vrun())
+        .args(["true", "-c", "echo hi"])
+        .env_remove("VAELRUN_CONFIG")
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(126));
+    let err = String::from_utf8(refused.stderr).unwrap();
+    assert!(err.contains("true"), "{err}");
+    assert!(err.to_ascii_lowercase().contains("trust"), "{err}");
+
+    let allowed = Command::new(vrun())
+        .args(["/bin/true"])
+        .env_remove("VAELRUN_CONFIG")
+        .output()
+        .unwrap();
+    assert_eq!(
+        allowed.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&allowed.stderr)
+    );
+}
+
+#[test]
+fn inline_overrides_dotenv_and_parent_reaches_child() {
+    let dir = tempfile::tempdir().unwrap();
+    let envfile = dir.path().join(".env");
+    fs::write(&envfile, "MY_VAR=from-file\nOTHER=from-file\n").unwrap();
+    let out = Command::new(vrun())
+        .arg("--no-trust")
+        .arg("MY_VAR=from-inline")
+        .arg(&envfile)
+        .args([
+            "/bin/sh",
+            "-c",
+            "printf '%s\\n%s\\n%s' \"$MY_VAR\" \"$OTHER\" \"$PARENT_VAR\"",
+        ])
+        .env("PARENT_VAR", "from-parent")
+        .env_remove("VAELRUN_CONFIG")
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "from-inline\nfrom-file\nfrom-parent"
+    );
+}
+
+#[test]
+fn dotenv_path_is_not_a_command_argument() {
+    let dir = tempfile::tempdir().unwrap();
+    let envfile = dir.path().join("prod.env");
+    fs::write(&envfile, "OTHER=1\n").unwrap();
+    let out = Command::new(vrun())
+        .arg("--no-trust")
+        .arg(&envfile)
+        .args(["/bin/sh", "-c", "printf '%s' \"$0\""])
+        .env_remove("VAELRUN_CONFIG")
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "/bin/sh");
+}
+
+#[test]
+fn edit_is_not_an_assignment() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("log");
+    let editor = dir.path().join("editor.sh");
+    write_exe(
+        &editor,
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$#\" > {}\nprintf '%s\\n' \"$1\" >> {}\n",
+            log.display(),
+            log.display()
+        ),
+    );
+    let target = dir.path().join("my file.cs");
+    fs::write(&target, "").unwrap();
+    let out = Command::new(vrun())
+        .arg("-e")
+        .arg(&target)
+        .env("EDITOR", &editor)
+        .env_remove("VISUAL")
+        .env_remove("VAELRUN_CONFIG")
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let logged = fs::read_to_string(&log).unwrap();
+    assert_eq!(logged, format!("1\n{}\n", target.display()));
+}
+
+#[test]
+fn directory_open_uses_the_opener_seam() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("folder");
+    fs::create_dir(&target).unwrap();
+    let log = dir.path().join("opened");
+    let opener = dir.path().join("opener.sh");
+    write_exe(
+        &opener,
+        &format!("#!/bin/sh\nprintf '%s' \"$1\" > {}\n", log.display()),
+    );
+    let code = vaelrun::run_with(vaelrun::RunOptions {
+        opener: Some(opener.as_os_str().to_os_string()),
+        args: Some(vec!["vrun".into(), target.as_os_str().to_os_string()]),
+    })
+    .unwrap();
+    assert_eq!(code, 0);
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        target.display().to_string()
+    );
+}
+
+#[test]
+fn vrun_script_and_or_and_pipe() {
+    let dir = tempfile::tempdir().unwrap();
+    let ok = dir.path().join("ok.vrun");
+    fs::write(&ok, "/bin/true && /bin/false || /bin/true\n").unwrap();
+    let out = Command::new(vrun())
+        .arg(&ok)
+        .env_remove("VAELRUN_CONFIG")
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let fail = dir.path().join("fail.vrun");
+    fs::write(&fail, "/bin/false && /bin/true\n").unwrap();
+    let out = Command::new(vrun())
+        .arg(&fail)
+        .env_remove("VAELRUN_CONFIG")
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let piped = dir.path().join("pipe.vrun");
+    fs::write(&piped, "/usr/bin/printf hello | /bin/cat\n").unwrap();
+    let out = Command::new(vrun())
+        .arg(&piped)
+        .env_remove("VAELRUN_CONFIG")
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "hello");
+}
