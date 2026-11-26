@@ -1,10 +1,11 @@
 //! Cross-platform run, open, and start.
 //!
-//! Path hints and `.vrun` command graphs are implemented here. This crate does
-//! not vendor Neotales.Exec or neotales-process.
+//! [`load_config`], [`build_environment`], [`launch`], and [`open`] are the
+//! library entry points. The `vrun` binary parses argv and calls those functions.
 
 #![deny(unsafe_code)]
 
+mod api;
 mod cli;
 mod complete;
 mod config;
@@ -16,6 +17,10 @@ mod script;
 mod shebang;
 mod template;
 
+pub use api::{
+    CommandMode, Config, Environment, EnvironmentInput, Launch, build_environment, launch,
+    load_config, open,
+};
 pub use error::Error;
 
 use std::ffi::OsString;

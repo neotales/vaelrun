@@ -1,3 +1,7 @@
+[workspace]
+resolver = "3"
+members = [".", "e2e/env-replace"]
+
 [package]
 name = "vaelrun"
 version = "0.0.0-alpha.1"
@@ -7,6 +11,7 @@ license = "MIT"
 authors = ["Neotales"]
 description = "cross-platform run, open, and start"
 readme = "README.md"
+publish = false
 
 [[bin]]
 name = "vrun"

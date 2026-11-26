@@ -26,7 +26,8 @@ struct Ctx<'a> {
     args: &'a [OsString],
 }
 
-enum Mode {
+#[derive(Clone, Copy)]
+pub(crate) enum Mode {
     Implicit,
     Run,
     Start,
@@ -65,23 +66,22 @@ pub(crate) fn run(opts: RunOptions) -> Result<i32, Error> {
         profile.as_deref(),
         extra.as_deref(),
     );
-    let config = config::load_config(&paths)?;
+    let loaded = crate::load_config(&paths)?;
+    let parent: Vec<_> = std::env::vars_os().collect();
+    let environment = crate::build_environment(&crate::EnvironmentInput {
+        parent: &parent,
+        dotenv: &inv.dotenv,
+        unset: &inv.unset,
+        inline: &inv.inline,
+        cwd: &inv.cwd,
+        injector: loaded.injector(),
+        config: &loaded,
+        trust: inv.trust,
+    })?;
+    let config = loaded.inner().clone();
+    let env = environment.inner().clone();
     let trust_on = inv.trust.unwrap_or_else(|| config.trust_on());
     let bin_dirs = expand_bins(&config, home.as_deref(), &inv.cwd);
-    let parent: Vec<_> = std::env::vars_os().collect();
-    let parent_finder = build_finder(&bin_dirs, &dotenv::parent_map(&parent));
-    let injector = resolve_injector(&config, &parent_finder, &inv.cwd, trust_on)?;
-    let env = dotenv::build_env(
-        &parent,
-        &inv.dotenv,
-        &inv.unset,
-        &inv.inline,
-        &inv.cwd,
-        injector.as_ref().map(|item| dotenv::Injector {
-            argv: &item.argv,
-            program: &item.program,
-        }),
-    )?;
     let finder = build_finder(&bin_dirs, &env);
     let skip_detach = std::env::var_os("VAELRUN_DETACHED").as_deref() == Some(OsStr::new("1"));
     let ctx = Ctx {
@@ -107,12 +107,22 @@ pub(crate) fn run(opts: RunOptions) -> Result<i32, Error> {
     {
         return Ok(code);
     }
-    let mode = if inv.force_run {
-        Mode::Run
-    } else {
-        Mode::Implicit
-    };
-    dispatch(&inv.command[0], &inv.command[1..], mode, inv.detach, &ctx)
+    crate::launch(&crate::Launch {
+        argv: &inv.command,
+        cwd: &inv.cwd,
+        env: &environment,
+        config: &loaded,
+        trust: inv.trust,
+        sudo: inv.sudo,
+        opener: opts.opener.as_deref(),
+        args: &args,
+        mode: if inv.force_run {
+            crate::CommandMode::Run
+        } else {
+            crate::CommandMode::Implicit
+        },
+        detach: inv.detach,
+    })
 }
 
 fn subcommand(inv: &Invocation, bin_dirs: &[PathBuf], ctx: &Ctx<'_>) -> Result<Option<i32>, Error> {
@@ -1307,28 +1317,146 @@ fn exit_code(status: ExitStatus) -> i32 {
     1
 }
 
-struct ResolvedInjector {
+pub(crate) struct ResolvedInjector {
     argv: Vec<String>,
     program: PathBuf,
 }
 
-fn resolve_injector(
+pub(crate) struct ChildEnvRequest<'a> {
+    pub parent: &'a [(OsString, OsString)],
+    pub dotenv: &'a [PathBuf],
+    pub unset: &'a [String],
+    pub inline: &'a [(String, OsString)],
+    pub cwd: &'a Path,
+    pub config: &'a Config,
+    pub trust_on: bool,
+    pub injector: Option<&'a [String]>,
+}
+
+pub(crate) fn build_child_env(request: &ChildEnvRequest<'_>) -> Result<EnvMap, Error> {
+    let home = parent_value(request.parent, "HOME")
+        .or_else(|| parent_value(request.parent, "USERPROFILE"));
+    let bin_dirs = expand_bins(request.config, home.as_deref(), request.cwd);
+    let parent_finder = build_finder(&bin_dirs, &dotenv::parent_map(request.parent));
+    let resolved = match request.injector {
+        Some(argv) if !argv.is_empty() => Some(resolve_injector_argv(
+            argv,
+            &parent_finder,
+            request.cwd,
+            request.trust_on,
+        )?),
+        _ => None,
+    };
+    dotenv::build_env(
+        request.parent,
+        request.dotenv,
+        request.unset,
+        request.inline,
+        request.cwd,
+        resolved.as_ref().map(|item| dotenv::Injector {
+            argv: &item.argv,
+            program: &item.program,
+        }),
+    )
+}
+
+fn parent_value(parent: &[(OsString, OsString)], key: &str) -> Option<PathBuf> {
+    parent.iter().find_map(|(name, value)| {
+        if name.to_str() == Some(key) && !value.is_empty() {
+            Some(PathBuf::from(value))
+        } else {
+            None
+        }
+    })
+}
+
+pub(crate) struct CommandRequest<'a> {
+    pub cwd: &'a Path,
+    pub env: &'a EnvMap,
+    pub config: &'a Config,
+    pub trust_on: bool,
+    pub sudo: bool,
+    pub opener: Option<&'a OsStr>,
+    pub args: &'a [OsString],
+    pub command: &'a [OsString],
+    pub mode: Mode,
+    pub detach: bool,
+}
+
+pub(crate) fn launch_command(request: &CommandRequest<'_>) -> Result<i32, Error> {
+    if request.command.is_empty() {
+        return Err(Error::usage("missing command"));
+    }
+    let home = request.env.get("HOME").map(PathBuf::from).or_else(|| {
+        if cfg!(windows) {
+            request.env.get("USERPROFILE").map(PathBuf::from)
+        } else {
+            None
+        }
+    });
+    let bin_dirs = expand_bins(request.config, home.as_deref(), request.cwd);
+    let finder = build_finder(&bin_dirs, request.env);
+    let skip_detach = std::env::var_os("VAELRUN_DETACHED").as_deref() == Some(OsStr::new("1"));
+    let ctx = Ctx {
+        cwd: request.cwd,
+        env: request.env,
+        config: request.config,
+        finder: &finder,
+        trust_on: request.trust_on,
+        sudo: request.sudo,
+        opener: request.opener,
+        skip_detach,
+        args: request.args,
+    };
+    dispatch(
+        &request.command[0],
+        &request.command[1..],
+        request.mode,
+        request.detach,
+        &ctx,
+    )
+}
+
+pub(crate) fn open_command(
+    cwd: &Path,
+    env: &EnvMap,
     config: &Config,
+    trust_on: bool,
+    opener: Option<&OsStr>,
+    target: &OsStr,
+    detach: bool,
+) -> Result<i32, Error> {
+    let home = env.get("HOME").map(PathBuf::from);
+    let bin_dirs = expand_bins(config, home.as_deref(), cwd);
+    let finder = build_finder(&bin_dirs, env);
+    let ctx = Ctx {
+        cwd,
+        env,
+        config,
+        finder: &finder,
+        trust_on,
+        sudo: false,
+        opener,
+        skip_detach: false,
+        args: &[],
+    };
+    open_target(target, detach, &ctx, false)
+}
+
+pub(crate) fn resolve_injector_argv(
+    argv: &[String],
     finder: &Finder,
     cwd: &Path,
     trust_on: bool,
-) -> Result<Option<ResolvedInjector>, Error> {
-    let Some(argv) = config.injector_argv() else {
-        return Ok(None);
-    };
+) -> Result<ResolvedInjector, Error> {
     let program = resolve::resolve_program(OsStr::new(&argv[0]), finder, cwd, trust_on)?;
-    Ok(Some(ResolvedInjector {
+    Ok(ResolvedInjector {
         argv: argv.to_vec(),
         program,
-    }))
+    })
 }
 
-fn expand_bins(config: &Config, home: Option<&Path>, cwd: &Path) -> Vec<PathBuf> {
+pub(crate) fn expand_bins(config: &Config, home: Option<&Path>, cwd: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     for raw in &config.bin_dirs {
         let path = config::expand_bin_dir(raw, home, cwd);
@@ -1339,7 +1467,7 @@ fn expand_bins(config: &Config, home: Option<&Path>, cwd: &Path) -> Vec<PathBuf>
     dirs
 }
 
-fn build_finder(bin_dirs: &[PathBuf], env: &EnvMap) -> Finder {
+pub(crate) fn build_finder(bin_dirs: &[PathBuf], env: &EnvMap) -> Finder {
     let home = env.get("HOME").map(PathBuf::from).or_else(|| {
         if cfg!(windows) {
             env.get("USERPROFILE").map(PathBuf::from)
