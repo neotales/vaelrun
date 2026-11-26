@@ -370,6 +370,22 @@ fn is_builtin(suffix: &str) -> bool {
             | ".vbproj"
             | ".py"
             | ".rb"
+            | ".nu"
+            | ".exs"
+            | ".lua"
+            | ".php"
+            | ".tcl"
+            | ".fish"
+            | ".groovy"
+            | ".awk"
+            | ".dart"
+            | ".jl"
+            | ".pl"
+            | ".rkt"
+            | ".zsh"
+            | ".bat"
+            | ".cmd"
+            | ".r"
     )
 }
 
@@ -405,20 +421,41 @@ fn builtin_argv(
     let path = file.to_string_lossy();
     let extra = owned_args(extras);
     let extra_refs = refs_of(&extra);
-    let cmd = match suffix {
-        ".sh" => shell_script(&path, &extra_refs),
-        ".ps1" => powershell_script(&path, &extra_refs),
-        ".ts" | ".tsx" => neotales_exec_script::bun::file(&path, extra_refs.iter().copied()),
-        ".js" | ".mjs" | ".cjs" => javascript_script(&path, &extra_refs),
-        ".go" => neotales_exec_script::golang::file(&path, extra_refs.iter().copied()),
-        ".cs" | ".csx" | ".dll" | ".exe" | ".csproj" | ".fsproj" | ".vbproj" => {
-            neotales_exec_script::dotnet::file(&path, extra_refs.iter().copied())
-        }
-        ".py" => neotales_exec_script::python::file(&path, extra_refs.iter().copied()),
-        ".rb" => neotales_exec_script::ruby::file(&path, extra_refs.iter().copied()),
-        _ => return Err(Error::not_found(suffix)),
+    let Some(cmd) = script_builder(suffix, &path, &extra_refs) else {
+        return Err(Error::not_found(suffix));
     };
     authorize_builder(cmd, ctx)
+}
+
+fn script_builder(suffix: &str, path: &str, args: &[&str]) -> Option<neotales_exec::Command> {
+    Some(match suffix {
+        ".sh" => shell_script(path, args),
+        ".ps1" => powershell_script(path, args),
+        ".ts" | ".tsx" => neotales_exec_script::bun::file(path, args.iter().copied()),
+        ".js" | ".mjs" | ".cjs" => javascript_script(path, args),
+        ".go" => neotales_exec_script::golang::file(path, args.iter().copied()),
+        ".cs" | ".csx" | ".dll" | ".exe" | ".csproj" | ".fsproj" | ".vbproj" => {
+            neotales_exec_script::dotnet::file(path, args.iter().copied())
+        }
+        ".py" => python_script(path, args),
+        ".rb" => neotales_exec_script::ruby::file(path, args.iter().copied()),
+        ".nu" => neotales_exec_script::nushell::file(path, args.iter().copied()),
+        ".exs" => neotales_exec_script::elixir::file(path, args.iter().copied()),
+        ".lua" => neotales_exec_script::lua::file(path, args.iter().copied()),
+        ".php" => neotales_exec_script::php::file(path, args.iter().copied()),
+        ".tcl" => neotales_exec_script::tcl::file(path, args.iter().copied()),
+        ".fish" => neotales_exec_script::fish::file(path, args.iter().copied()),
+        ".groovy" => neotales_exec_script::groovy::file(path, args.iter().copied()),
+        ".awk" => neotales_exec_script::awk::file(path, args.iter().copied()),
+        ".dart" => neotales_exec_script::dart::file(path, args.iter().copied()),
+        ".jl" => neotales_exec_script::julia::file(path, args.iter().copied()),
+        ".pl" => neotales_exec_script::perl::file(path, args.iter().copied()),
+        ".rkt" => neotales_exec_script::racket::file(path, args.iter().copied()),
+        ".zsh" => neotales_exec_script::zsh::file(path, args.iter().copied()),
+        ".bat" | ".cmd" => neotales_exec_script::cmd::file(path, args.iter().copied()),
+        ".r" => neotales_exec_script::r::file(path, args.iter().copied()),
+        _ => return None,
+    })
 }
 
 /// `find` only accepts a registered absolute candidate. A bare name left by the
@@ -464,6 +501,15 @@ fn powershell_script(path: &str, args: &[&str]) -> neotales_exec::Command {
     }
 }
 
+fn python_script(path: &str, args: &[&str]) -> neotales_exec::Command {
+    let python = neotales_exec_script::python::file(path, args.iter().copied());
+    if runtime_resolved(&python, "python") || neotales_exec::find("python", None).is_ok() {
+        python
+    } else {
+        neotales_exec_script::uv::file(path, args.iter().copied())
+    }
+}
+
 fn javascript_script(path: &str, args: &[&str]) -> neotales_exec::Command {
     let bun = neotales_exec_script::bun::file(path, args.iter().copied());
     if runtime_resolved(&bun, "bun") || neotales_exec::find("bun", None).is_ok() {
@@ -490,6 +536,20 @@ fn runtime_name(interpreter: &str) -> Option<&'static str> {
         "node" => Some("node"),
         "bun" => Some("bun"),
         "deno" => Some("deno"),
+        "nu" => Some("nu"),
+        "elixir" => Some("elixir"),
+        "uv" => Some("uv"),
+        "lua" => Some("lua"),
+        "php" => Some("php"),
+        "tclsh" => Some("tclsh"),
+        "fish" => Some("fish"),
+        "groovy" => Some("groovy"),
+        "awk" => Some("awk"),
+        "dart" => Some("dart"),
+        "julia" => Some("julia"),
+        "perl" => Some("perl"),
+        "racket" => Some("racket"),
+        "Rscript" | "rscript" => Some("r"),
         _ => None,
     }
 }
@@ -500,7 +560,10 @@ fn runtime_shebang(
     shell_args: &[&str],
     extras: &[&str],
 ) -> Option<neotales_exec::Command> {
-    use neotales_exec_script::{bash, bun, deno, node, powershell, pwsh, python, ruby, sh, zsh};
+    use neotales_exec_script::{
+        awk, bash, bun, dart, deno, elixir, fish, groovy, julia, lua, node, nushell, perl, php,
+        powershell, pwsh, python, r, racket, ruby, sh, tcl, uv, zsh,
+    };
     let cmd = match name {
         "bash" if shell_args.is_empty() => bash::file(script, extras.iter().copied()),
         "bash" => {
@@ -545,6 +608,76 @@ fn runtime_shebang(
             .args(extras.iter().copied()),
         "ruby" if shell_args.is_empty() => ruby::file(script, extras.iter().copied()),
         "ruby" => ruby::new(std::iter::empty())
+            .args(shell_args.iter().copied())
+            .arg(script)
+            .args(extras.iter().copied()),
+        "nu" if shell_args.is_empty() => nushell::file(script, extras.iter().copied()),
+        "nu" => nushell::new(std::iter::empty())
+            .args(shell_args.iter().copied())
+            .arg(script)
+            .args(extras.iter().copied()),
+        "elixir" if shell_args.is_empty() => elixir::file(script, extras.iter().copied()),
+        "elixir" => elixir::new(std::iter::empty())
+            .args(shell_args.iter().copied())
+            .arg(script)
+            .args(extras.iter().copied()),
+        "uv" if shell_args.is_empty() => uv::file(script, extras.iter().copied()),
+        "uv" => uv::new(std::iter::empty())
+            .args(shell_args.iter().copied())
+            .arg(script)
+            .args(extras.iter().copied()),
+        "lua" if shell_args.is_empty() => lua::file(script, extras.iter().copied()),
+        "lua" => lua::new(std::iter::empty())
+            .args(shell_args.iter().copied())
+            .arg(script)
+            .args(extras.iter().copied()),
+        "php" if shell_args.is_empty() => php::file(script, extras.iter().copied()),
+        "php" => php::new(std::iter::empty())
+            .args(shell_args.iter().copied())
+            .arg(script)
+            .args(extras.iter().copied()),
+        "tclsh" if shell_args.is_empty() => tcl::file(script, extras.iter().copied()),
+        "tclsh" => tcl::new(std::iter::empty())
+            .args(shell_args.iter().copied())
+            .arg(script)
+            .args(extras.iter().copied()),
+        "fish" if shell_args.is_empty() => fish::file(script, extras.iter().copied()),
+        "fish" => fish::new(std::iter::empty())
+            .args(shell_args.iter().copied())
+            .arg(script)
+            .args(extras.iter().copied()),
+        "groovy" if shell_args.is_empty() => groovy::file(script, extras.iter().copied()),
+        "groovy" => groovy::new(std::iter::empty())
+            .args(shell_args.iter().copied())
+            .arg(script)
+            .args(extras.iter().copied()),
+        "awk" if shell_args.is_empty() => awk::file(script, extras.iter().copied()),
+        "awk" => awk::new(std::iter::empty())
+            .args(shell_args.iter().copied())
+            .arg(script)
+            .args(extras.iter().copied()),
+        "dart" if shell_args.is_empty() => dart::file(script, extras.iter().copied()),
+        "dart" => dart::new(std::iter::empty())
+            .args(shell_args.iter().copied())
+            .arg(script)
+            .args(extras.iter().copied()),
+        "julia" if shell_args.is_empty() => julia::file(script, extras.iter().copied()),
+        "julia" => julia::new(std::iter::empty())
+            .args(shell_args.iter().copied())
+            .arg(script)
+            .args(extras.iter().copied()),
+        "perl" if shell_args.is_empty() => perl::file(script, extras.iter().copied()),
+        "perl" => perl::new(std::iter::empty())
+            .args(shell_args.iter().copied())
+            .arg(script)
+            .args(extras.iter().copied()),
+        "racket" if shell_args.is_empty() => racket::file(script, extras.iter().copied()),
+        "racket" => racket::new(std::iter::empty())
+            .args(shell_args.iter().copied())
+            .arg(script)
+            .args(extras.iter().copied()),
+        "r" if shell_args.is_empty() => r::file(script, extras.iter().copied()),
+        "r" => r::new(std::iter::empty())
             .args(shell_args.iter().copied())
             .arg(script)
             .args(extras.iter().copied()),
@@ -1075,3 +1208,33 @@ Options:
   -h, --help            Show this help
   --version             Show version
 ";
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+    use std::path::Path;
+
+    use super::{is_builtin, script_builder};
+    use crate::cli::extension_suffix;
+
+    #[test]
+    fn remaining_script_suffixes_use_exec_script() {
+        for suffix in [
+            ".nu", ".exs", ".lua", ".php", ".tcl", ".fish", ".groovy", ".awk", ".dart", ".jl",
+            ".pl", ".rkt", ".zsh", ".bat", ".cmd", ".r",
+        ] {
+            assert!(is_builtin(suffix), "{suffix}");
+        }
+        assert_eq!(
+            extension_suffix(OsStr::new("plot.R")).as_deref(),
+            Some(".r")
+        );
+        let cmd = script_builder(".nu", "app.nu", &[]).unwrap();
+        let program = cmd.program().to_string_lossy();
+        let name = Path::new(program.as_ref())
+            .file_name()
+            .unwrap()
+            .to_string_lossy();
+        assert!(name == "nu" || name == "nu.exe", "{program}");
+    }
+}
