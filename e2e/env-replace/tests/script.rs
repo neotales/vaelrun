@@ -140,12 +140,15 @@ fn prepare_hosts() {
     set_env("UV_PYTHON_PREFERENCE", "only-system");
     set_env("DOTNET_CLI_TELEMETRY_OPTOUT", "1");
     set_env("DOTNET_NOLOGO", "1");
+    prefer_git_bash();
     let missing: Vec<&str> = TOOLS
         .iter()
         .filter(|(bin, _)| !on_path(bin))
         .map(|(_, tool)| *tool)
         .collect();
-    if missing.is_empty() {
+    // mise has no bash tool. A missing bash stays missing.
+    let installable: Vec<&str> = missing.into_iter().filter(|tool| *tool != "bash").collect();
+    if installable.is_empty() {
         for (bin, _) in TOOLS {
             check_version(bin);
         }
@@ -156,7 +159,7 @@ fn prepare_hosts() {
     }
     let root = repo_root();
     let config = root.join("mise.toml");
-    for tool in missing {
+    for tool in installable {
         mise_install(&root, &config, tool);
     }
     prepend_path(&shim_dir());
@@ -164,6 +167,21 @@ fn prepare_hosts() {
         check_version(bin);
     }
 }
+
+/// `System32\bash.exe` is the WSL launcher and fails `--version`. Git bash does not.
+#[cfg(windows)]
+fn prefer_git_bash() {
+    if on_path("bash") {
+        return;
+    }
+    let dir = Path::new(r"C:\Program Files\Git\bin");
+    if dir.join("bash.exe").is_file() {
+        prepend_path(dir);
+    }
+}
+
+#[cfg(not(windows))]
+fn prefer_git_bash() {}
 
 fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
     if let Some(message) = payload.downcast_ref::<String>() {
@@ -296,26 +314,33 @@ fn set_env(key: &str, value: impl AsRef<std::ffi::OsStr>) {
 }
 
 fn on_path(name: &str) -> bool {
-    !matches!(
-        Command::new(name).arg("--version").output(),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound
-    )
+    version_output(name).is_ok_and(|output| output.status.success())
 }
 
-fn check_version(bin: &str) {
+fn version_output(bin: &str) -> std::io::Result<Output> {
     let mut cmd = Command::new(bin);
     if bin == "go" {
         cmd.arg("version");
     } else {
         cmd.arg("--version");
     }
-    let output = cmd
-        .output()
-        .unwrap_or_else(|err| panic!("{bin} version check failed: {err}"));
-    if !output.status.success() {
-        panic!(
-            "{bin} version check failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+    cmd.output()
+}
+
+fn check_version(bin: &str) {
+    let output = version_output(bin).unwrap_or_else(|err| {
+        panic!("{bin} version check failed: exit none stdout: stderr: {err}");
+    });
+    if output.status.success() {
+        return;
     }
+    let code = output
+        .status
+        .code()
+        .map_or_else(|| "none".to_string(), |code| code.to_string());
+    panic!(
+        "{bin} version check failed: exit {code} stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

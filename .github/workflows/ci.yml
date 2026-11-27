@@ -95,6 +95,14 @@ jobs:
         with:
           cache_key_prefix: scripts-${{ matrix.os }}
 
+      - name: Prefer Git bash
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = 'C:\Program Files\Git\bin'
+          if (-not (Test-Path -LiteralPath "$dir\bash.exe")) { throw "missing $dir\bash.exe" }
+          Add-Content -Path $env:GITHUB_PATH -Value $dir
+
       - name: Require script hosts
         if: runner.os != 'Windows'
         shell: bash
@@ -124,6 +132,8 @@ jobs:
             }
           }
           if ($missing) { exit 1 }
+          & bash --version
+          if ($LASTEXITCODE -ne 0) { throw "bash --version exited $LASTEXITCODE" }
 
       - name: Injector e2e
         run: cargo test -p env-replace
