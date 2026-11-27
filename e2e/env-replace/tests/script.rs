@@ -168,12 +168,9 @@ fn prepare_hosts() {
     }
 }
 
-/// `System32\bash.exe` is the WSL launcher and fails `--version`. Git bash does not.
+/// CreateProcess searches System32 before `PATH`. Put Git bash first so a PATH walk finds it.
 #[cfg(windows)]
 fn prefer_git_bash() {
-    if on_path("bash") {
-        return;
-    }
     let dir = Path::new(r"C:\Program Files\Git\bin");
     if dir.join("bash.exe").is_file() {
         prepend_path(dir);
@@ -317,8 +314,64 @@ fn on_path(name: &str) -> bool {
     version_output(name).is_ok_and(|output| output.status.success())
 }
 
+/// Walk `PATH` and `PATHEXT`. `Command::new("bash")` would run System32 ahead of `PATH`.
+fn resolve_on_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        for candidate in path_candidates(name) {
+            let file = dir.join(&candidate);
+            if file.is_file() {
+                return Some(file);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn path_candidates(name: &str) -> Vec<String> {
+    let mut names = vec![name.to_string()];
+    if Path::new(name).extension().is_some() {
+        return names;
+    }
+    let pathext =
+        std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD;.PS1".to_string());
+    for item in pathext.split(';') {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        let suffix = if item.starts_with('.') {
+            item.to_string()
+        } else {
+            format!(".{item}")
+        };
+        if !name
+            .to_ascii_lowercase()
+            .ends_with(&suffix.to_ascii_lowercase())
+        {
+            names.push(format!("{name}{suffix}"));
+        }
+    }
+    names
+}
+
+#[cfg(not(windows))]
+fn path_candidates(name: &str) -> Vec<String> {
+    vec![name.to_string()]
+}
+
 fn version_output(bin: &str) -> std::io::Result<Output> {
-    let mut cmd = Command::new(bin);
+    let program = resolve_on_path(bin).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("{bin} is not on PATH"),
+        )
+    })?;
+    let mut cmd = Command::new(program);
     if bin == "go" {
         cmd.arg("version");
     } else {
