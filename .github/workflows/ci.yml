@@ -128,5 +128,10 @@ jobs:
       - name: Injector e2e
         run: cargo test -p env-replace
 
+      - name: Allow unsigned pwsh scripts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy Bypass -Force
+
       - name: Script e2e
         run: cargo test -p env-replace --features e2e-scripts

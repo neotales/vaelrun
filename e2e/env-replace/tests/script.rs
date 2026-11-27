@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::Once;
+use std::sync::Mutex;
 
 use vaelrun::RunOptions;
 
@@ -112,30 +112,67 @@ fn run_marker(script: &Path, marker: &Path, text: &str) {
     assert_eq!(std::fs::read_to_string(marker).unwrap(), text);
 }
 
-/// Installs missing hosts once, then puts mise's shim directory on `PATH`.
+/// Installs a missing host once. Hosts already on `PATH` skip mise entirely.
 fn prepare() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        // uv must not fetch another Python. The dotnet CLI must stay quiet.
-        set_env("UV_PYTHON_PREFERENCE", "only-system");
-        set_env("DOTNET_CLI_TELEMETRY_OPTOUT", "1");
-        set_env("DOTNET_NOLOGO", "1");
-        if !on_path("mise") {
-            panic!("mise is required");
+    static SLOT: Mutex<Option<Result<(), String>>> = Mutex::new(None);
+    let mut slot = SLOT.lock().unwrap_or_else(|err| err.into_inner());
+    if let Some(result) = slot.clone() {
+        drop(slot);
+        if let Err(message) = result {
+            panic!("{message}");
         }
-        let root = repo_root();
-        let config = root.join("mise.toml");
-        for (bin, tool) in TOOLS {
-            if !on_path(bin) {
-                mise_install(&root, &config, tool);
-            }
-        }
-        let shims = shim_dir();
-        prepend_path(&shims);
+        return;
+    }
+    let stored = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(prepare_hosts)) {
+        Ok(()) => Ok(()),
+        Err(payload) => Err(panic_message(payload)),
+    };
+    let failed = stored.clone().err();
+    *slot = Some(stored);
+    drop(slot);
+    if let Some(message) = failed {
+        panic!("{message}");
+    }
+}
+
+fn prepare_hosts() {
+    // uv must not fetch another Python. The dotnet CLI must stay quiet.
+    set_env("UV_PYTHON_PREFERENCE", "only-system");
+    set_env("DOTNET_CLI_TELEMETRY_OPTOUT", "1");
+    set_env("DOTNET_NOLOGO", "1");
+    let missing: Vec<&str> = TOOLS
+        .iter()
+        .filter(|(bin, _)| !on_path(bin))
+        .map(|(_, tool)| *tool)
+        .collect();
+    if missing.is_empty() {
         for (bin, _) in TOOLS {
             check_version(bin);
         }
-    });
+        return;
+    }
+    if !on_path("mise") {
+        panic!("mise is required");
+    }
+    let root = repo_root();
+    let config = root.join("mise.toml");
+    for tool in missing {
+        mise_install(&root, &config, tool);
+    }
+    prepend_path(&shim_dir());
+    for (bin, _) in TOOLS {
+        check_version(bin);
+    }
+}
+
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+    "script host setup failed".to_string()
 }
 
 fn repo_root() -> PathBuf {
@@ -196,7 +233,13 @@ fn shim_dir() -> PathBuf {
         .args(["--no-config", "doctor", "-J"])
         .output()
         .unwrap_or_else(|err| panic!("mise is required: {err}"));
-    expect_success(&output, "mise doctor");
+    if !output.status.success() {
+        panic!(
+            "mise doctor failed: stdout: {} stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     let json = String::from_utf8_lossy(&output.stdout);
     let dir = json_path(&json, "shims").unwrap_or_else(|| {
         panic!("mise doctor did not report a shim directory: {json}");
@@ -242,11 +285,11 @@ fn prepend_path(dir: &Path) {
 
 /// `set_var` is unsafe because a concurrent environment read is undefined.
 ///
-/// `prepare` is the only caller, and its `Once` keeps the other script tests from
+/// `prepare` is the only caller. Its mutex keeps the other script tests from
 /// reading the environment until these writes finish.
 fn set_env(key: &str, value: impl AsRef<std::ffi::OsStr>) {
     // SAFETY: see the function comment. No other thread in this binary writes
-    // the environment, and the other script tests are blocked in `call_once`.
+    // the environment, and the other script tests wait on `prepare`'s mutex.
     unsafe {
         std::env::set_var(key, value);
     }
