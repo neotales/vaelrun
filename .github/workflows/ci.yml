@@ -75,30 +75,55 @@ jobs:
           if ($out -notmatch 'vaelrun') { throw 'release binary stdout missing vaelrun' }
 
   scripts:
-    name: scripts
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    name: scripts (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - windows-2025
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: ./.github/actions/setup-rust
         with:
-          cache-key: scripts
+          cache-key: scripts-${{ matrix.os }}
 
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
-          mise_toml: |
-            [tools]
-            python = "3"
-            node = "22"
+          cache_key_prefix: scripts-${{ matrix.os }}
 
-      - name: Require python and node
+      - name: Require script hosts
+        if: runner.os != 'Windows'
+        shell: bash
         run: |
           set -euo pipefail
-          command -v python
-          command -v node
-          python --version
-          node --version
+          missing=0
+          for name in python node bun deno go uv dotnet pwsh bash; do
+            if ! command -v "$name"; then
+              echo "missing $name" >&2
+              missing=1
+            fi
+          done
+          test "$missing" -eq 0
+
+      - name: Require script hosts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $missing = $false
+          foreach ($name in 'python', 'node', 'bun', 'deno', 'go', 'uv', 'dotnet', 'pwsh', 'bash') {
+            $cmd = Get-Command $name -ErrorAction SilentlyContinue
+            if ($null -eq $cmd) {
+              Write-Output "missing $name"
+              $missing = $true
+            } else {
+              Write-Output $cmd.Source
+            }
+          }
+          if ($missing) { exit 1 }
 
       - name: Injector e2e
         run: cargo test -p env-replace

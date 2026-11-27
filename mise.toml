@@ -1,0 +1,11 @@
+# Majors, not latest. Ids are the ones `mise registry` and `mise latest` accept.
+# bash is not a mise tool; the script tests use the bash already on PATH.
+[tools]
+python = "3"
+node = "22"
+bun = "1"
+deno = "2"
+go = "1"
+uv = "0"
+dotnet = "10"
+powershell = "7"

@@ -597,11 +597,33 @@ const PS_FLAGS: [&str; 1] = ["-NoLogo"];
 fn powershell_script(path: &str, args: &[&str]) -> neotales_exec::Command {
     let pwsh =
         neotales_exec_script::pwsh::file_with_shell_args(path, PS_FLAGS, args.iter().copied());
-    if runtime_resolved(&pwsh, "pwsh") || neotales_exec::find("pwsh", None).is_ok() {
+    // A mise shim is not a registered candidate. Keep the bare name so trust still
+    // refuses a PATH-only hit; do not resolve it here.
+    if runtime_resolved(&pwsh, "pwsh") || pwsh_available() {
         pwsh
     } else {
         neotales_exec_script::powershell::file_with_shell_args(path, PS_FLAGS, args.iter().copied())
     }
+}
+
+/// `find` only sees registered paths. A PATH `pwsh` still has to pass trust later.
+fn pwsh_available() -> bool {
+    if neotales_exec::find("pwsh", None).is_ok() {
+        return true;
+    }
+    let path = std::env::var_os("PATH");
+    let pathext = std::env::var_os("PATHEXT");
+    resolve::Finder::new(
+        Vec::new(),
+        path.as_deref(),
+        pathext.as_deref(),
+        None,
+        None,
+        None,
+        None,
+    )
+    .lookup("pwsh")
+    .is_some()
 }
 
 fn python_script(path: &str, args: &[&str]) -> neotales_exec::Command {
