@@ -86,14 +86,7 @@ jobs:
           cache-key: ui
 
       - name: Test
-        shell: bash
-        run: |
-          set -euo pipefail
-          if grep -q 'github.com/anomalyco/rune' Cargo.lock; then
-            cargo test -p vaelrun-ui --offline
-          else
-            cargo test -p vaelrun-ui
-          fi
+        run: cargo test -p vaelrun-ui --locked
 
   scripts:
     name: scripts (${{ matrix.os }})
