@@ -2,6 +2,7 @@
 //!
 //! [`load_config`], [`build_environment`], [`launch`], and [`open`] are the
 //! library entry points. The `vrun` binary parses argv and calls those functions.
+//! [`task`] stores named commands and the argv prefix `vrun` would use to run them.
 
 #![deny(unsafe_code)]
 
@@ -15,6 +16,7 @@ mod resolve;
 mod run;
 mod script;
 mod shebang;
+pub mod task;
 mod template;
 
 pub use api::{
@@ -22,6 +24,10 @@ pub use api::{
     load_config, open,
 };
 pub use error::Error;
+pub use task::{
+    LaunchRequest, Move, Scope, Task, TaskStore, add_icon, filter_tasks, folder_tasks_path,
+    global_tasks_path, icons_dir, launch_args, launch_request, move_env_file, move_env_var,
+};
 
 use std::ffi::OsString;
 use std::path::PathBuf;
