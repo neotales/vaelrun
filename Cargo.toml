@@ -1,3 +1,16 @@
 [workspace]
 resolver = "3"
-members = ["vaelrun-core", "vaelrun", "e2e/env-replace"]
+members = ["vaelrun-core", "vaelrun", "vaelrun-ui", "e2e/env-replace"]
+
+# Rune dd15d6a7f5dc6627bee869578098ada65182ec43 root [patch.crates-io].
+# That file patches by path inside the Rune repo. An app uses the same crates
+# at the same rev, which is the form that revision's README gives to apps.
+[patch.crates-io]
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "dd15d6a7f5dc6627bee869578098ada65182ec43" }
+naga = { git = "https://github.com/anomalyco/rune", rev = "dd15d6a7f5dc6627bee869578098ada65182ec43" }
+winit = { git = "https://github.com/anomalyco/rune", rev = "dd15d6a7f5dc6627bee869578098ada65182ec43" }
+sctk-adwaita = { git = "https://github.com/anomalyco/rune", rev = "dd15d6a7f5dc6627bee869578098ada65182ec43" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "dd15d6a7f5dc6627bee869578098ada65182ec43" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "dd15d6a7f5dc6627bee869578098ada65182ec43" }
+accesskit_atspi_common = { git = "https://github.com/anomalyco/rune", rev = "dd15d6a7f5dc6627bee869578098ada65182ec43" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "dd15d6a7f5dc6627bee869578098ada65182ec43" }

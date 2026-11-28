@@ -1,0 +1,20 @@
+[package]
+name = "vaelrun-ui"
+version = "0.0.0-alpha.1"
+edition = "2024"
+rust-version = "1.100"
+license = "MIT"
+authors = ["Neotales"]
+description = "vaelrun desktop task window"
+publish = false
+
+[[bin]]
+name = "vaelrun-ui"
+path = "src/main.rs"
+
+[dependencies]
+vaelrun-core = { path = "../vaelrun-core" }
+rune = { git = "https://github.com/anomalyco/rune", rev = "dd15d6a7f5dc6627bee869578098ada65182ec43" }
+
+[dev-dependencies]
+tempfile = "3.27.0"
