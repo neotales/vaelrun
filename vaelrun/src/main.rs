@@ -1,5 +1,5 @@
 fn main() {
-    let code = match vaelrun::run() {
+    let code = match vaelrun_core::run() {
         Ok(code) => code,
         Err(err) => {
             eprintln!("{err}");

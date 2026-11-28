@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Mutex;
 
-use vaelrun::RunOptions;
+use vaelrun_core::RunOptions;
 
 /// Bare name the tests look up, and the mise tool id that installs it.
 const TOOLS: &[(&str, &str)] = &[
@@ -98,7 +98,7 @@ fn run_host(name: &str, source: &str, text: &str) {
 
 fn run_marker(script: &Path, marker: &Path, text: &str) {
     // --no-trust: mise shims are PATH hits, and trust would refuse them.
-    let code = vaelrun::run_with(RunOptions {
+    let code = vaelrun_core::run_with(RunOptions {
         args: Some(vec![
             "vrun".into(),
             "--no-trust".into(),

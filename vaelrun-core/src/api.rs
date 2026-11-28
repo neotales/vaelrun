@@ -109,7 +109,7 @@ pub struct EnvironmentInput<'a> {
 ///
 /// ```
 /// use std::ffi::OsString;
-/// use vaelrun::{EnvironmentInput, build_environment, load_config};
+/// use vaelrun_core::{EnvironmentInput, build_environment, load_config};
 ///
 /// let config = load_config(&[]).expect("empty path list");
 /// let dir = std::env::temp_dir().join(format!("vaelrun-doc-{}", std::process::id()));

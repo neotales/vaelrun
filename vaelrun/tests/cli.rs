@@ -191,7 +191,7 @@ fn directory_open_uses_the_opener_seam() {
         &opener,
         &format!("#!/bin/sh\nprintf '%s' \"$1\" > {}\n", log.display()),
     );
-    let code = vaelrun::run_with(vaelrun::RunOptions {
+    let code = vaelrun_core::run_with(vaelrun_core::RunOptions {
         opener: Some(opener.as_os_str().to_os_string()),
         args: Some(vec!["vrun".into(), target.as_os_str().to_os_string()]),
         ..Default::default()
@@ -615,7 +615,7 @@ fn extensionless_text_is_opened_not_executed() {
     perms.set_mode(0o755);
     fs::set_permissions(&notes, perms).unwrap();
     let (log, opener) = opener_seam(dir.path());
-    let code = vaelrun::run_with(vaelrun::RunOptions {
+    let code = vaelrun_core::run_with(vaelrun_core::RunOptions {
         opener: Some(opener.into()),
         args: Some(vec!["vrun".into(), notes.as_os_str().to_os_string()]),
         ..Default::default()
@@ -637,7 +637,7 @@ fn extensionless_nul_executable_is_not_opened() {
     perms.set_mode(0o755);
     fs::set_permissions(&blob, perms).unwrap();
     let (log, opener) = opener_seam(dir.path());
-    let result = vaelrun::run_with(vaelrun::RunOptions {
+    let result = vaelrun_core::run_with(vaelrun_core::RunOptions {
         opener: Some(opener.into()),
         args: Some(vec!["vrun".into(), blob.as_os_str().to_os_string()]),
         ..Default::default()
@@ -658,7 +658,7 @@ fn pdf_with_shebang_is_opened_not_interpreted() {
     let pdf = dir.path().join("doc.pdf");
     fs::write(&pdf, format!("#!{}\n", interp.display())).unwrap();
     let (opened, opener) = opener_seam(dir.path());
-    let code = vaelrun::run_with(vaelrun::RunOptions {
+    let code = vaelrun_core::run_with(vaelrun_core::RunOptions {
         opener: Some(opener.into()),
         args: Some(vec!["vrun".into(), pdf.as_os_str().to_os_string()]),
         ..Default::default()
@@ -678,7 +678,7 @@ fn start_hands_a_pdf_to_the_opener() {
     let pdf = dir.path().join("doc.pdf");
     fs::write(&pdf, "#!/bin/sh\necho no\n").unwrap();
     let (opened, opener) = opener_seam(dir.path());
-    let code = vaelrun::run_with(vaelrun::RunOptions {
+    let code = vaelrun_core::run_with(vaelrun_core::RunOptions {
         opener: Some(opener.into()),
         args: Some(vec![
             "vrun".into(),
@@ -725,7 +725,7 @@ fn scripts_suffix_runs_a_shebang_and_opens_without_one() {
     let plain = dir.path().join("plain.txt");
     fs::write(&plain, "just text\n").unwrap();
     let (opened, opener) = opener_seam(dir.path());
-    let code = vaelrun::run_with(vaelrun::RunOptions {
+    let code = vaelrun_core::run_with(vaelrun_core::RunOptions {
         opener: Some(opener.into()),
         args: Some(vec!["vrun".into(), plain.as_os_str().to_os_string()]),
         config: Some(cfg),
@@ -744,7 +744,7 @@ fn urls_off_does_not_open_and_urls_on_does() {
     let cfg = dir.path().join("config.ini");
     fs::write(&cfg, "[open]\nurls = off\n").unwrap();
     let (log, opener) = opener_seam(dir.path());
-    let err = vaelrun::run_with(vaelrun::RunOptions {
+    let err = vaelrun_core::run_with(vaelrun_core::RunOptions {
         opener: Some(opener.as_os_str().to_os_string()),
         args: Some(vec![
             "vrun".into(),
@@ -762,7 +762,7 @@ fn urls_off_does_not_open_and_urls_on_does() {
     );
     assert!(!log.exists());
 
-    let err = vaelrun::run_with(vaelrun::RunOptions {
+    let err = vaelrun_core::run_with(vaelrun_core::RunOptions {
         opener: Some(opener.as_os_str().to_os_string()),
         args: Some(vec![
             "vrun".into(),
@@ -776,7 +776,7 @@ fn urls_off_does_not_open_and_urls_on_does() {
     assert!(!log.exists());
 
     fs::write(&cfg, "[open]\nurls = on\n").unwrap();
-    let code = vaelrun::run_with(vaelrun::RunOptions {
+    let code = vaelrun_core::run_with(vaelrun_core::RunOptions {
         opener: Some(opener.into()),
         args: Some(vec![
             "vrun".into(),
@@ -855,7 +855,7 @@ fn alias_to_vrun_file_runs_the_line() {
 #[test]
 fn help_uses_the_invoked_name() {
     let (code, text) = capture_stdout(|| {
-        vaelrun::run_with(vaelrun::RunOptions {
+        vaelrun_core::run_with(vaelrun_core::RunOptions {
             args: Some(vec!["vr".into(), "-h".into()]),
             ..Default::default()
         })
@@ -871,7 +871,7 @@ fn help_uses_the_invoked_name() {
     assert!(!text.contains("vrun"), "{text}");
 
     let (code, text) = capture_stdout(|| {
-        vaelrun::run_with(vaelrun::RunOptions {
+        vaelrun_core::run_with(vaelrun_core::RunOptions {
             args: Some(vec!["vr.exe".into(), "--help".into()]),
             ..Default::default()
         })

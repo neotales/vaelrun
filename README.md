@@ -2,7 +2,7 @@
 
 vrun runs a command, opens a path or URL, or detaches a process. `NAME=value` prefixes, dotenv files, and `#!` scripts work the same way on Linux, macOS, and Windows.
 
-The library crate is `vaelrun/` and the CLI package is `vaelrun-cli`.
+`vaelrun-core` is the library, `vaelrun` is the CLI package, the executable is still `vrun` because the crates.io name `vrun` is taken, and `vaelrun-ui` is the desktop app.
 
 Documentation is at https://vaelrun.dev.
 
@@ -26,7 +26,7 @@ dotnet build && dotnet test
 
 ## Install
 
-`cargo build --release -p vaelrun-cli` produces `vrun`. The package is `vaelrun-cli` because `vrun` is taken on crates.io.
+`cargo build --release -p vaelrun` produces `vrun`.
 
 A `v*` tag builds the six platform binaries and uploads them as workflow artifacts. They are not signed and are not attached to a GitHub Release yet.
 

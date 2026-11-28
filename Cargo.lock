@@ -29,7 +29,7 @@ version = "0.0.0-alpha.1"
 dependencies = [
  "neotales-dotenv",
  "tempfile",
- "vaelrun",
+ "vaelrun-core",
 ]
 
 [[package]]
@@ -291,19 +291,19 @@ checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 name = "vaelrun"
 version = "0.0.0-alpha.1"
 dependencies = [
+ "tempfile",
+ "vaelrun-core",
+]
+
+[[package]]
+name = "vaelrun-core"
+version = "0.0.0-alpha.1"
+dependencies = [
  "neotales-dotenv",
  "neotales-env",
  "neotales-exec",
  "neotales-exec-script",
  "tempfile",
-]
-
-[[package]]
-name = "vaelrun-cli"
-version = "0.0.0-alpha.1"
-dependencies = [
- "tempfile",
- "vaelrun",
 ]
 
 [[package]]

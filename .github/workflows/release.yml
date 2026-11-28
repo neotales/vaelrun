@@ -49,7 +49,7 @@ jobs:
           cache-key: release-${{ matrix.os }}
 
       - name: Build
-        run: cargo build --release --locked -p vaelrun-cli
+        run: cargo build --release --locked -p vaelrun
 
       - name: Read version
         id: version

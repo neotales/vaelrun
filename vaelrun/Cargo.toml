@@ -5,15 +5,16 @@ edition = "2024"
 rust-version = "1.100"
 license = "MIT"
 authors = ["Neotales"]
-description = "cross-platform run, open, and start"
-readme = "../README.md"
+description = "vrun, the vaelrun command"
 publish = false
 
+[[bin]]
+name = "vrun"
+path = "src/main.rs"
+
 [dependencies]
-neotales-dotenv = "=0.0.0-alpha.1"
-neotales-env = "=0.0.0-alpha.1"
-neotales-exec = { path = "../vendor/rs-exec/exec", version = "0.0.0-alpha.0" }
-neotales-exec-script = { path = "../vendor/rs-exec/exec-script", version = "0.0.0-alpha.0" }
+vaelrun-core = { path = "../vaelrun-core" }
 
 [dev-dependencies]
 tempfile = "3.27.0"
+vaelrun-core = { path = "../vaelrun-core" }

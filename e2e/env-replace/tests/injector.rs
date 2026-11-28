@@ -2,7 +2,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::process::Command;
 
-use vaelrun::{EnvironmentInput, build_environment, load_config};
+use vaelrun_core::{EnvironmentInput, build_environment, load_config};
 
 #[test]
 fn injector_replaces_the_marker_before_the_child_runs() {

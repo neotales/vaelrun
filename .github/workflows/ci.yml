@@ -50,7 +50,7 @@ jobs:
         run: cargo test --workspace --all-targets
 
       - name: Release binary
-        run: cargo build --release -p vaelrun-cli
+        run: cargo build --release -p vaelrun
 
       - name: Smoke the release binary
         if: runner.os != 'Windows'
