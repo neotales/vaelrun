@@ -85,6 +85,13 @@ jobs:
         with:
           cache-key: ui
 
+      - name: Link libraries
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libxkbcommon-dev libwayland-dev
+
       - name: Test
         run: cargo test -p vaelrun-ui --locked
 
